@@ -4,15 +4,20 @@ import torch
 import argparse
 import importlib
 import numpy as np
-from functools import reduce
-
+import random
 import utils
+
 import approach
+
+from functools import reduce
 from loggers.exp_logger import MultiLogger
 from datasets.data_loader import get_loaders
 from datasets.dataset_config import dataset_config
 from last_layer_analysis import last_layer_analysis
 from networks import tvmodels, allmodels, set_tvmodel_head_var
+
+random.seed(1)
+torch.manual_seed(1)
 
 
 def main(argv=None):
@@ -55,7 +60,7 @@ def main(argv=None):
     parser.add_argument('--stop-at-task', default=0, type=int, required=False,
                         help='Stop training after specified task (default=%(default)s)')
     # model args
-    parser.add_argument('--network', default='resnet32', type=str, choices=allmodels,
+    parser.add_argument('--network', default='resnet34', type=str, choices=allmodels,
                         help='Network architecture used (default=%(default)s)', metavar="NETWORK")
     parser.add_argument('--keep-existing-head', action='store_true',
                         help='Disable removing classifier last layer (default=%(default)s)')
@@ -127,7 +132,7 @@ def main(argv=None):
     ####################################################################################################################
 
     # Args -- Network
-    from networks.network import LLL_Net
+    from networks.network import LLL_Net, NExpertsKSelectors
     if args.network in tvmodels:  # torchvision models
         tvnet = getattr(importlib.import_module(name='torchvision.models'), args.network)
         if args.network == 'googlenet':
@@ -198,7 +203,10 @@ def main(argv=None):
 
     # Network and Approach instances
     utils.seed_everything(seed=args.seed)
-    net = LLL_Net(init_model, remove_existing_head=not args.keep_existing_head)
+    if args.approach == "neks":
+        net = NExpertsKSelectors(init_model, taskcla)
+    else:
+        net = LLL_Net(init_model, remove_existing_head=not args.keep_existing_head)
     utils.seed_everything(seed=args.seed)
     # taking transformations and class indices from first train dataset
     first_train_ds = trn_loader[0].dataset
