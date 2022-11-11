@@ -16,8 +16,7 @@ from datasets.dataset_config import dataset_config
 from last_layer_analysis import last_layer_analysis
 from networks import tvmodels, allmodels, set_tvmodel_head_var
 
-random.seed(1)
-torch.manual_seed(1)
+
 
 
 def main(argv=None):

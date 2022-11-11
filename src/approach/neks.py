@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from argparse import ArgumentParser
+
+from torch.distributions import Normal, MultivariateNormal
 from torch.utils.data import DataLoader, Dataset
 from .incremental_learning import Inc_Learning_Appr
 
@@ -49,39 +51,42 @@ class Appr(Inc_Learning_Appr):
 
     def train_first_epoch(self, t, trn_loader):
         """ In the first epoch of a task t, calculate means and stds of selector outputs"""
-        selectors_output = torch.full((len(trn_loader.dataset), 512), fill_value=-999999999.0)
-        total_samples = 0
+        selectors_output = torch.full((len(trn_loader.dataset), self.model.selectors_num, self.model.selector_features_dim), fill_value=-999999999.0)
         self.model.heads[-1].train()
         for i, (images, targets) in enumerate(trn_loader):
             # Forward current model
             bsz = images.shape[0]
-            total_samples += bsz
             outputs, features = self.model(images.to(self.device))
-
             loss = self.criterion(t, outputs, targets.to(self.device))
             # Backward
+
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self._train_parameters(), self.clipgrad)
             self.optimizer.step()
 
             from_ = i*trn_loader.batch_size
-            selectors_output[from_: from_+bsz] = self.model.forward_selectors(features)[0]
-        self.model.means[t] = selectors_output.mean(dim=0)
-        self.model.stds[t] = selectors_output.std(dim=0)
+            selectors_output[from_: from_+bsz] = torch.stack(self.model.forward_selectors(features), dim=1)
 
-        task_id = -1
-        plt.xlim(-2, 2)
-        for task_id in range(t+1):
-            plt.scatter(np.array(self.model.means[t]), [i for i in range(512)], marker="_", s=1000*np.array(self.model.stds[t]))
-        plt.savefig(f"mean_{t}_{task_id}.png")
-        plt.clf()
-        task_id = -1
-        plt.xlim(0.4, 1.1)
-        for task_id in range(t+1):
-            plt.scatter(np.array(self.model.stds[t]), [i for i in range(512)], marker="_")
-        plt.savefig(f"std_{t}_{task_id}.png")
-        plt.clf()
+        self.model.means[t] = selectors_output.mean(dim=0)
+        for i in range(self.model.selectors_num):
+            self.model.covs[t, i] = torch.cov(selectors_output[:, i].T)
+        self.model.tasks_learned_so_far = t+1
+        self.model.task_distributions = [[MultivariateNormal(self.model.means[t, s], self.model.covs[t, s]) for s in range(self.model.selectors_num)]
+                                         for t in range(int(self.model.tasks_learned_so_far))]
+
+        # task_id = -1
+        # plt.xlim(-2, 2)
+        # for task_id in range(t+1):
+        #     plt.scatter(np.array(self.model.means[t]), [i for i in range(self.model.selector_features_dim)], marker="_", s=1000*np.array(self.model.stds[t]))
+        # plt.savefig(f"mean_{t}_{task_id}.png")
+        # plt.clf()
+        # task_id = -1
+        # plt.xlim(0.4, 1.1)
+        # for task_id in range(t+1):
+        #     plt.scatter(np.array(self.model.stds[t]), [i for i in range(self.model.selector_features_dim)], marker="_")
+        # plt.savefig(f"std_{t}_{task_id}.png")
+        # plt.clf()
 
     def criterion(self, t, outputs, targets):
         """Returns the loss value"""
@@ -100,7 +105,7 @@ class Appr(Inc_Learning_Appr):
                 # Forward current model
                 outputs, features = self.model(images.to(self.device))
                 loss = self.criterion(t, outputs, targets.to(self.device))
-                hits_taw, hits_tag = self.calculate_metrics(outputs, features, targets,t )
+                hits_taw, hits_tag = self.calculate_metrics(outputs, features, targets)
                 # Log
                 total_loss += loss.item() * len(targets)
                 total_acc_taw += hits_taw.sum().item()
@@ -108,7 +113,7 @@ class Appr(Inc_Learning_Appr):
                 total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
-    def calculate_metrics(self, outputs, features, targets,t ):
+    def calculate_metrics(self, outputs, features, targets):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
         pred = torch.zeros_like(targets.to(self.device))
 

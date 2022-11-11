@@ -101,12 +101,14 @@ class NExpertsKSelectors(LLL_Net):
         super().__init__(backbone, remove_existing_head=True)
         self.taskcla = taskcla
         self.freeze_backbone()
-        self.selector_heads = nn.ModuleList([nn.Linear(512, 512)])
-        for sh in self.selector_heads:
-            sh.requires_grad = False
+        self.selector_features_dim = 32
+        self.selectors_num = 11
+        self.selector_heads = nn.ModuleList([SelectorHead(self.selector_features_dim) for _ in range(self.selectors_num)])
         tasks_total = len(taskcla)
-        self.means = torch.zeros(tasks_total, 512)
-        self.stds = torch.zeros(tasks_total, 512)
+        self.means = torch.zeros(tasks_total, self.selectors_num, self.selector_features_dim)
+        self.covs = torch.zeros(tasks_total, self.selectors_num, self.selector_features_dim, self.selector_features_dim)
+        self.task_distributions = None
+        self.model.tasks_learned_so_far = None
 
     def add_head(self, num_outputs):
         """Add a new head with the corresponding number of outputs. Also update the number of classes per task and the
@@ -134,14 +136,30 @@ class NExpertsKSelectors(LLL_Net):
             return [head(features) for head in self.selector_heads]
 
     def predict_task(self, features):
+        if self.tasks_learned_so_far == 1:
+            return 0
         with torch.no_grad():
-            features = [head(features) for head in self.selector_heads][0]
+            features = torch.stack([head(features) for head in self.selector_heads], dim=1)
             features = features.cpu()
-            tasks_learned_so_far = torch.sum(self.stds.any(dim=1))
-            task_distributions = [Normal(self.means[t], self.stds[t]) for t in range(int(tasks_learned_so_far))]
-            log_pdfs = [task_distributions[t].log_prob(features) for t in range(tasks_learned_so_far)]
-            log_pdfs = torch.cat(log_pdfs, dim=0)
-            log_pdfs = torch.pow(torch.abs(log_pdfs), exponent=1/8)
-            conf = torch.prod(log_pdfs, dim=1)
-            _, task_id = conf.min(dim=0)
+            log_pdfs = [torch.cat([self.task_distributions[t][s].log_prob(features[:, s]) for s in range(self.selectors_num)], dim=0)
+                        for t in range(self.tasks_learned_so_far)]
+            log_pdfs = torch.stack(log_pdfs, dim=0)
+            _, task_votes = torch.max(log_pdfs, dim=0)
+            task_id, _ = torch.mode(task_votes)
         return task_id
+
+
+class SelectorHead(nn.Module):
+    def __init__(self, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(512, out_dim, bias=False)
+        self.linear.weight.data.uniform_(-1.0, to=1.0)
+        vals = torch.rand_like(self.linear.weight)
+        _, sorted_indices = torch.sort(vals)
+        mask = vals < 0
+        mask.scatter_(1, sorted_indices[:, :10], ~mask)
+        self.linear.weight = torch.nn.Parameter(self.linear.weight * mask)
+        self.linear.requires_grad = False
+
+    def forward(self, x):
+        return self.linear(x)
