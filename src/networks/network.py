@@ -101,13 +101,14 @@ class NExpertsKSelectors(LLL_Net):
         super().__init__(backbone, remove_existing_head=True)
         self.taskcla = taskcla
         self.freeze_backbone()
-        self.selector_features_dim = 32
-        self.selectors_num = 11
-        self.selector_heads = nn.ModuleList([SelectorHead(self.selector_features_dim) for _ in range(self.selectors_num)])
+        self.selector_features_dim = 512
+        self.selectors_num = 1
+        self.subset_size = 512
+        self.selector_heads = nn.ModuleList([SelectorHead(self.selector_features_dim, self.subset_size) for _ in range(self.selectors_num)])
         tasks_total = len(taskcla)
         self.means = torch.zeros(tasks_total, self.selectors_num, self.selector_features_dim)
         self.covs = torch.zeros(tasks_total, self.selectors_num, self.selector_features_dim, self.selector_features_dim)
-        self.task_distributions = None
+        self.task_distributions = []
         self.model.tasks_learned_so_far = None
 
     def add_head(self, num_outputs):
@@ -150,15 +151,15 @@ class NExpertsKSelectors(LLL_Net):
 
 
 class SelectorHead(nn.Module):
-    def __init__(self, out_dim):
+    def __init__(self, out_dim, subset_size):
         super().__init__()
         self.linear = nn.Linear(512, out_dim, bias=False)
         self.linear.weight.data.uniform_(-1.0, to=1.0)
-        vals = torch.rand_like(self.linear.weight)
-        _, sorted_indices = torch.sort(vals)
-        mask = vals < 0
-        mask.scatter_(1, sorted_indices[:, :10], ~mask)
-        self.linear.weight = torch.nn.Parameter(self.linear.weight * mask)
+        # vals = torch.rand_like(self.linear.weight)
+        # _, sorted_indices = torch.sort(vals)
+        # mask = vals < 0
+        # mask.scatter_(1, sorted_indices[:, :subset_size], ~mask)
+        # self.linear.weight = torch.nn.Parameter(self.linear.weight * mask)
         self.linear.requires_grad = False
 
     def forward(self, x):

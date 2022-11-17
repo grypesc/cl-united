@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-import numpy as np
 
 from argparse import ArgumentParser
 
 from torch.distributions import Normal, MultivariateNormal
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from .incremental_learning import Inc_Learning_Appr
 
 
@@ -72,8 +71,7 @@ class Appr(Inc_Learning_Appr):
         for i in range(self.model.selectors_num):
             self.model.covs[t, i] = torch.cov(selectors_output[:, i].T)
         self.model.tasks_learned_so_far = t+1
-        self.model.task_distributions = [[MultivariateNormal(self.model.means[t, s], self.model.covs[t, s]) for s in range(self.model.selectors_num)]
-                                         for t in range(int(self.model.tasks_learned_so_far))]
+        self.model.task_distributions.append([MultivariateNormal(self.model.means[t, s], self.model.covs[t, s]) for s in range(self.model.selectors_num)])
 
         # task_id = -1
         # plt.xlim(-2, 2)
@@ -102,10 +100,11 @@ class Appr(Inc_Learning_Appr):
             total_loss, total_acc_taw, total_acc_tag, total_num = 0, 0, 0, 0
             self.model.eval()
             for images, targets in val_loader:
+                targets = targets.to(self.device)
                 # Forward current model
                 outputs, features = self.model(images.to(self.device))
-                loss = self.criterion(t, outputs, targets.to(self.device))
-                hits_taw, hits_tag = self.calculate_metrics(outputs, features, targets)
+                loss = self.criterion(t, outputs, targets)
+                hits_taw, hits_tag = self.calculate_metrics(outputs, features, targets, t)
                 # Log
                 total_loss += loss.item() * len(targets)
                 total_acc_taw += hits_taw.sum().item()
@@ -113,19 +112,20 @@ class Appr(Inc_Learning_Appr):
                 total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
-    def calculate_metrics(self, outputs, features, targets):
+    def calculate_metrics(self, outputs, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
-        pred = torch.zeros_like(targets.to(self.device))
+        pred = torch.zeros_like(targets)
 
         # Task-Aware Multi-Head
         for m in range(len(pred)):
-            this_task = (self.model.task_cls.cumsum(0) <= targets[m]).sum()
+            this_task = t
             pred[m] = outputs[this_task][m].argmax() + self.model.task_offset[this_task]
-        hits_taw = (pred == targets.to(self.device)).float()
+        hits_taw = (pred == targets).float()
 
-        # Task-Agnostic Multi-Head
+        # WARNING: THIS CALCULATES ACCURACY OF SELECTORS, NOT ACC OF NEKS TASK AGNOSTIC, RESEARCH PURPOSE
         for m in range(len(pred)):
             this_task = self.model.predict_task(features[m:m+1])
-            pred[m] = outputs[this_task][m].argmax() + self.model.task_offset[this_task]
-        hits_tag = (pred == targets.to(self.device)).float()
+            pred[m] = this_task
+            targets[m] = t
+        hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
