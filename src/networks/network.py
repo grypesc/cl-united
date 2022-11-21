@@ -3,6 +3,7 @@ from torch import nn
 from torch.distributions.normal import Normal
 from copy import deepcopy
 
+from src.networks.resnet import resnet18
 
 class LLL_Net(nn.Module):
     """Basic class for implementing networks"""
@@ -97,17 +98,22 @@ class LLL_Net(nn.Module):
 
 
 class NExpertsKSelectors(LLL_Net):
-    def __init__(self, backbone, taskcla):
-        super().__init__(backbone, remove_existing_head=True)
+
+    def __init__(self, backbone, taskcla, device):
+        super().__init__(backbone, remove_existing_head=False)
+        state_dict = torch.load("networks/resnet18-f37072fd.pth")
+        self.model = resnet18(state_dict)
+        self.model.fc = nn.Identity()
         self.taskcla = taskcla
         self.freeze_backbone()
         self.selector_features_dim = 512
         self.selectors_num = 1
         self.subset_size = 512
+        self.device = device
         self.selector_heads = nn.ModuleList([SelectorHead(self.selector_features_dim, self.subset_size) for _ in range(self.selectors_num)])
         tasks_total = len(taskcla)
-        self.means = torch.zeros(tasks_total, self.selectors_num, self.selector_features_dim)
-        self.covs = torch.zeros(tasks_total, self.selectors_num, self.selector_features_dim, self.selector_features_dim)
+        self.means = torch.zeros((tasks_total, self.selectors_num, self.selector_features_dim), device=device)
+        self.covs = torch.zeros((tasks_total, self.selectors_num, self.selector_features_dim, self.selector_features_dim), device=device)
         self.task_distributions = []
         self.model.tasks_learned_so_far = None
 
@@ -115,7 +121,7 @@ class NExpertsKSelectors(LLL_Net):
         """Add a new head with the corresponding number of outputs. Also update the number of classes per task and the
         corresponding offsets. Head is an expert here.
         """
-        self.heads.append(nn.Linear(self.out_size, num_outputs))
+        self.heads.append(nn.Linear(512, num_outputs))
         # we re-compute instead of append in case an approach makes changes to the heads
         self.task_cls = torch.tensor([head.out_features for head in self.heads])
         self.task_offset = torch.cat([torch.LongTensor(1).zero_(), self.task_cls.cumsum(0)[:-1]])
@@ -126,7 +132,6 @@ class NExpertsKSelectors(LLL_Net):
         Simplification to work on multi-head only -- returns all head outputs in a list
         Args:
             x (tensor): input images
-            return_features (bool): return the representations before the heads
         """
         with torch.no_grad():
             x = self.model(x)
@@ -141,12 +146,11 @@ class NExpertsKSelectors(LLL_Net):
             return 0
         with torch.no_grad():
             features = torch.stack([head(features) for head in self.selector_heads], dim=1)
-            features = features.cpu()
-            log_pdfs = [torch.cat([self.task_distributions[t][s].log_prob(features[:, s]) for s in range(self.selectors_num)], dim=0)
-                        for t in range(self.tasks_learned_so_far)]
-            log_pdfs = torch.stack(log_pdfs, dim=0)
-            _, task_votes = torch.max(log_pdfs, dim=0)
-            task_id, _ = torch.mode(task_votes)
+            log_probs = [torch.cat([self.task_distributions[t][s].log_prob(features[:, s]) for s in range(self.selectors_num)], dim=0)
+                         for t in range(self.tasks_learned_so_far)]
+            log_probs = torch.stack(log_probs, dim=0)
+            log_sums = torch.sum(log_probs, dim=1)
+            task_id = torch.argmax(log_sums)
         return task_id
 
 
