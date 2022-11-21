@@ -101,19 +101,18 @@ class NExpertsKSelectors(LLL_Net):
 
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=False)
-        state_dict = torch.load("networks/resnet18-f37072fd.pth")
-        self.model = resnet18(state_dict)
+        # state_dict = torch.load("networks/resnet18-f37072fd.pth")
+        # self.model = resnet18(state_dict)
         self.model.fc = nn.Identity()
         self.taskcla = taskcla
         self.freeze_backbone()
         self.selector_features_dim = 512
-        self.selectors_num = 1
         self.subset_size = 512
         self.device = device
-        self.selector_heads = nn.ModuleList([SelectorHead(self.selector_features_dim, self.subset_size) for _ in range(self.selectors_num)])
+        self.selector_head = SelectorHead(self.selector_features_dim, self.subset_size)
         tasks_total = len(taskcla)
-        self.means = torch.zeros((tasks_total, self.selectors_num, self.selector_features_dim), device=device)
-        self.covs = torch.zeros((tasks_total, self.selectors_num, self.selector_features_dim, self.selector_features_dim), device=device)
+        self.means = torch.zeros((tasks_total, self.selector_features_dim), device=device)
+        self.covs = torch.zeros((tasks_total, self.selector_features_dim, self.selector_features_dim), device=device)
         self.task_distributions = []
         self.model.tasks_learned_so_far = None
 
@@ -137,28 +136,25 @@ class NExpertsKSelectors(LLL_Net):
             x = self.model(x)
         return [head(x) for head in self.heads], x
 
-    def forward_selectors(self, features):
-        with torch.no_grad():
-            return [head(features) for head in self.selector_heads]
+    def forward_selector(self, features):
+        return self.selector_head(features)
 
     def predict_task(self, features):
         if self.tasks_learned_so_far == 1:
             return 0
         with torch.no_grad():
-            features = torch.stack([head(features) for head in self.selector_heads], dim=1)
-            log_probs = [torch.cat([self.task_distributions[t][s].log_prob(features[:, s]) for s in range(self.selectors_num)], dim=0)
-                         for t in range(self.tasks_learned_so_far)]
+            features = self.forward_selector(features)
+            log_probs = [self.task_distributions[t].log_prob(features) for t in range(self.tasks_learned_so_far)]
             log_probs = torch.stack(log_probs, dim=0)
-            log_sums = torch.sum(log_probs, dim=1)
-            task_id = torch.argmax(log_sums)
+            task_id = torch.argmax(log_probs)
         return task_id
 
 
 class SelectorHead(nn.Module):
     def __init__(self, out_dim, subset_size):
         super().__init__()
-        self.linear = nn.Linear(512, out_dim, bias=False)
-        self.linear.weight.data.uniform_(-1.0, to=1.0)
+        self.linear = nn.Identity()
+        # self.linear.weight.data.uniform_(-1.0, to=1.0)
         # vals = torch.rand_like(self.linear.weight)
         # _, sorted_indices = torch.sort(vals)
         # mask = vals < 0
@@ -167,4 +163,5 @@ class SelectorHead(nn.Module):
         self.linear.requires_grad = False
 
     def forward(self, x):
+        # x = nn.functional.normalize(x, p=2, dim=1)
         return self.linear(x)
