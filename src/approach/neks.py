@@ -50,7 +50,8 @@ class Appr(Inc_Learning_Appr):
 
     def train_first_epoch(self, t, trn_loader):
         """ In the first epoch of a task t, calculate means and stds of selector outputs"""
-        selectors_output = torch.full((len(trn_loader.dataset), self.model.selectors_num, self.model.selector_features_dim), fill_value=-999999999.0)
+        selectors_output = torch.full((len(trn_loader.dataset), self.model.selectors_num, self.model.selector_features_dim), fill_value=-999999999.0,
+                                      device=self.model.device)
         self.model.heads[-1].train()
         for i, (images, targets) in enumerate(trn_loader):
             # Forward current model
@@ -70,6 +71,7 @@ class Appr(Inc_Learning_Appr):
         self.model.means[t] = selectors_output.mean(dim=0)
         for i in range(self.model.selectors_num):
             self.model.covs[t, i] = torch.cov(selectors_output[:, i].T)
+        self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1, device=self.model.device)).unsqueeze(0)
         self.model.tasks_learned_so_far = t+1
         self.model.task_distributions.append([MultivariateNormal(self.model.means[t, s], self.model.covs[t, s]) for s in range(self.model.selectors_num)])
 
