@@ -3,7 +3,7 @@ from torch import nn
 from torch.distributions.normal import Normal
 from copy import deepcopy
 
-from src.networks.resnet import resnet18
+# from src.networks.resnet import resnet18, resnet34
 
 class LLL_Net(nn.Module):
     """Basic class for implementing networks"""
@@ -100,12 +100,17 @@ class LLL_Net(nn.Module):
 class NExpertsKSelectors(LLL_Net):
 
     def __init__(self, backbone, taskcla, device):
-        super().__init__(backbone, remove_existing_head=False)
-        # state_dict = torch.load("networks/resnet18-f37072fd.pth")
+        super().__init__(backbone, remove_existing_head=True)
+        # state_dict = torch.load("networks/best.pth")
         # self.model = resnet18(state_dict)
         self.model.fc = nn.Identity()
+
+
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.model.eval()
         self.taskcla = taskcla
-        self.freeze_backbone()
         self.selector_features_dim = 512
         self.subset_size = 512
         self.device = device
@@ -134,7 +139,7 @@ class NExpertsKSelectors(LLL_Net):
         """
         with torch.no_grad():
             x = self.model(x)
-        return [head(x) for head in self.heads], x
+        return x
 
     def forward_selector(self, features):
         return self.selector_head(features)
@@ -164,4 +169,4 @@ class SelectorHead(nn.Module):
 
     def forward(self, x):
         # x = nn.functional.normalize(x, p=2, dim=1)
-        return self.linear(x)
+        return x
