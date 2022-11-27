@@ -97,24 +97,22 @@ class LLL_Net(nn.Module):
         pass
 
 
-class NExpertsKSelectors(LLL_Net):
+class Extractor(LLL_Net):
 
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=True)
         # state_dict = torch.load("networks/best.pth")
         # self.model = resnet18(state_dict)
         self.model.fc = nn.Identity()
-
-
-
         for param in self.model.parameters():
             param.requires_grad = False
         self.model.eval()
+
         self.taskcla = taskcla
         self.selector_features_dim = 512
-        self.subset_size = 512
+        self.subset_size = 10
         self.device = device
-        self.selector_head = SelectorHead(self.selector_features_dim, self.subset_size)
+        self.head = SelectorHead(self.selector_features_dim, self.subset_size)
         tasks_total = len(taskcla)
         self.means = torch.zeros((tasks_total, self.selector_features_dim), device=device)
         self.covs = torch.zeros((tasks_total, self.selector_features_dim, self.selector_features_dim), device=device)
@@ -131,24 +129,14 @@ class NExpertsKSelectors(LLL_Net):
         self.task_offset = torch.cat([torch.LongTensor(1).zero_(), self.task_cls.cumsum(0)[:-1]])
 
     def forward(self, x):
-        """Applies the forward pass
-
-        Simplification to work on multi-head only -- returns all head outputs in a list
-        Args:
-            x (tensor): input images
-        """
         with torch.no_grad():
-            x = self.model(x)
-        return x
-
-    def forward_selector(self, features):
-        return self.selector_head(features)
+            features = self.model(x)
+            return self.head(features)
 
     def predict_task(self, features):
         if self.tasks_learned_so_far == 1:
             return 0
         with torch.no_grad():
-            features = self.forward_selector(features)
             log_probs = [self.task_distributions[t].log_prob(features) for t in range(self.tasks_learned_so_far)]
             log_probs = torch.stack(log_probs, dim=0)
             task_id = torch.argmax(log_probs)

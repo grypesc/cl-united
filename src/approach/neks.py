@@ -51,18 +51,6 @@ class Appr(Inc_Learning_Appr):
             self.train_first_epoch(t, trn_loader)
             return
 
-        self.model.heads[-1].train()
-        for i, (images, targets) in enumerate(trn_loader):
-            # Forward current model
-            outputs, _ = self.model(images.to(self.device))
-
-            loss = self.criterion(t, outputs, targets.to(self.device))
-            # Backward
-            # self.optimizer.zero_grad()
-            # loss.backward()
-            # torch.nn.utils.clip_grad_norm_(self._train_parameters(), self.clipgrad)
-            # self.optimizer.step()
-
     def train_first_epoch(self, t, trn_loader):
         """ In the first epoch of a task t, calculate means and stds of selector outputs"""
         selectors_output = torch.full((len(trn_loader.dataset), self.model.selector_features_dim), fill_value=-999999999.0,
@@ -87,18 +75,19 @@ class Appr(Inc_Learning_Appr):
             # self.optimizer.step()
 
             from_ = i*trn_loader.batch_size
-            selectors_output[from_: from_+bsz] = self.model.forward_selector(features)
+            selectors_output[from_: from_+bsz] = features
 
         # selectors_output = nn.functional.normalize(x, p=2, dim=1)
 
         self.model.means[t] = selectors_output.mean(dim=0)
-        if t == 0:
-            self.model.means[t] += 10000
+        # if t == 0:
+        #     self.model.means[t] += 10000
         if self.use_multivariate:
             self.model.covs[t] = torch.cov(selectors_output.T)
-            self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1, device=self.model.device))
+            self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-1, device=self.model.device))
         else:
             self.model.covs[t] = torch.diag(torch.std(selectors_output, dim=0))
+            self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-3, device=self.model.device))
 
         self.model.task_distributions.append(MultivariateNormal(self.model.means[t], self.model.covs[t]))
         self.model.tasks_learned_so_far = t+1
@@ -120,7 +109,6 @@ class Appr(Inc_Learning_Appr):
                 targets = targets.to(self.device)
                 # Forward current model
                 features = self.model(images.to(self.device))
-                features = self.model.forward_selector(features)
                 hits_taw, hits_tag = self.calculate_metrics(features, targets, t)
                 # Log
                 total_loss = 0

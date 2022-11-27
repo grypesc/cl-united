@@ -131,7 +131,7 @@ def main(argv=None):
     ####################################################################################################################
 
     # Args -- Network
-    from networks.network import LLL_Net, NExpertsKSelectors
+    from networks.network import LLL_Net, Extractor
     if args.network in tvmodels:  # torchvision models
         tvnet = getattr(importlib.import_module(name='torchvision.models'), args.network)
         if args.network == 'googlenet':
@@ -203,7 +203,7 @@ def main(argv=None):
     # Network and Approach instances
     utils.seed_everything(seed=args.seed)
     if args.approach == "neks":
-        net = NExpertsKSelectors(init_model, taskcla, device)
+        net = Extractor(init_model, taskcla, device)
     else:
         net = LLL_Net(init_model, remove_existing_head=not args.keep_existing_head)
     utils.seed_everything(seed=args.seed)
@@ -271,19 +271,19 @@ def main(argv=None):
         appr.train(t, trn_loader[t], val_loader[t])
         print('-' * 108)
 
-        # Test
-        for u in range(t + 1):
-            test_loss, acc_taw[t, u], acc_tag[t, u] = appr.eval(u, tst_loader[u])
-            if u < t:
-                forg_taw[t, u] = acc_taw[:t, u].max(0) - acc_taw[t, u]
-                forg_tag[t, u] = acc_tag[:t, u].max(0) - acc_tag[t, u]
-            print('>>> Test on task {:2d} : loss={:.3f} | TAw acc={:5.1f}%, forg={:5.1f}%'
-                  '| TAg acc={:5.1f}%, forg={:5.1f}% <<<'.format(u, test_loss,
-                                                                 100 * acc_taw[t, u], 100 * forg_taw[t, u],
-                                                                 100 * acc_tag[t, u], 100 * forg_tag[t, u]))
-            logger.log_scalar(task=t, iter=u, name='loss', group='test', value=test_loss)
-            logger.log_scalar(task=t, iter=u, name='acc_taw', group='test', value=100 * acc_taw[t, u])
-            logger.log_scalar(task=t, iter=u, name='acc_tag', group='test', value=100 * acc_tag[t, u])
+    # Test
+    for u in range(t + 1):
+        test_loss, acc_taw[t, u], acc_tag[t, u] = appr.eval(u, tst_loader[u])
+        if u < t:
+            forg_taw[t, u] = acc_taw[:t, u].max(0) - acc_taw[t, u]
+            forg_tag[t, u] = acc_tag[:t, u].max(0) - acc_tag[t, u]
+        print('>>> Test on task {:2d} : loss={:.3f} | TAw acc={:5.1f}%, forg={:5.1f}%'
+              '| TAg acc={:5.1f}%, forg={:5.1f}% <<<'.format(u, test_loss,
+                                                             100 * acc_taw[t, u], 100 * forg_taw[t, u],
+                                                             100 * acc_tag[t, u], 100 * forg_tag[t, u]))
+        logger.log_scalar(task=t, iter=u, name='loss', group='test', value=test_loss)
+        logger.log_scalar(task=t, iter=u, name='acc_taw', group='test', value=100 * acc_taw[t, u])
+        logger.log_scalar(task=t, iter=u, name='acc_tag', group='test', value=100 * acc_tag[t, u])
         # logger.log_scalar(task=t, iter=u, name='forg_taw', group='test', value=100 * forg_taw[t, u])
         # logger.log_scalar(task=t, iter=u, name='forg_tag', group='test', value=100 * forg_tag[t, u])
 
