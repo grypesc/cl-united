@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -35,27 +37,77 @@ class Appr(Inc_Learning_Appr):
 
     def train_loop(self, t, trn_loader, val_loader):
         """Contains the epochs loop"""
+        lr = self.lr
+        best_loss = np.inf
+        patience = self.lr_patience
+        best_model = self.model.get_copy()
 
-        trn_loader = torch.utils.data.DataLoader(trn_loader.dataset,
-                                                 batch_size=trn_loader.batch_size,
-                                                 shuffle=True,
-                                                 num_workers=trn_loader.num_workers,
-                                                 pin_memory=trn_loader.pin_memory)
+        self.optimizer = self._get_optimizer()
 
-        super().train_loop(t, trn_loader, val_loader)
+        # Loop epochs
+        for e in range(self.nepochs):
+            # Train
+            clock0 = time.time()
+            self.train_epoch(t, trn_loader, val_loader)
+            clock1 = time.time()
+            if self.eval_on_train:
+                train_loss, train_acc, _ = self.eval(t, trn_loader)
+                clock2 = time.time()
+                print('| Epoch {:3d}, time={:5.1f}s/{:5.1f}s | Train: loss={:.3f}, TAw acc={:5.1f}% |'.format(
+                    e + 1, clock1 - clock0, clock2 - clock1, train_loss, 100 * train_acc), end='')
+                self.logger.log_scalar(task=t, iter=e + 1, name="loss", value=train_loss, group="train")
+                self.logger.log_scalar(task=t, iter=e + 1, name="acc", value=100 * train_acc, group="train")
+            else:
+                print('| Epoch {:3d}, time={:5.1f}s | Train: skip eval |'.format(e + 1, clock1 - clock0), end='')
 
-    def train_epoch(self, t, trn_loader):
+            # Valid
+            clock3 = time.time()
+            valid_loss, valid_acc, _ = self.eval(t, val_loader)
+            clock4 = time.time()
+            print(' Valid: time={:5.1f}s loss={:.3f}, TAw acc={:5.1f}% |'.format(
+                clock4 - clock3, valid_loss, 100 * valid_acc), end='')
+            self.logger.log_scalar(task=t, iter=e + 1, name="loss", value=valid_loss, group="valid")
+            self.logger.log_scalar(task=t, iter=e + 1, name="acc", value=100 * valid_acc, group="valid")
+
+            # Adapt learning rate - patience scheme - early stopping regularization
+            if valid_loss < best_loss:
+                # if the loss goes down, keep it as the best model and end line with a star ( * )
+                best_loss = valid_loss
+                best_model = self.model.get_copy()
+                patience = self.lr_patience
+                print(' *', end='')
+            else:
+                # if the loss does not go down, decrease patience
+                patience -= 1
+                if patience <= 0:
+                    # if it runs out of patience, reduce the learning rate
+                    lr /= self.lr_factor
+                    print(' lr={:.1e}'.format(lr), end='')
+                    if lr < self.lr_min:
+                        # if the lr decreases below minimum, stop the training session
+                        print()
+                        break
+                    # reset patience and recover best model so far to continue training
+                    patience = self.lr_patience
+                    self.optimizer.param_groups[0]['lr'] = lr
+                    self.model.set_state_dict(best_model)
+            self.logger.log_scalar(task=t, iter=e + 1, name="patience", value=patience, group="train")
+            self.logger.log_scalar(task=t, iter=e + 1, name="lr", value=lr, group="train")
+            print()
+        self.model.set_state_dict(best_model)
+
+    def train_epoch(self, t, trn_loader, val_loader):
         """Runs a single epoch"""
         self.model.eval()
         if not self.model.means[t].detach().all():
-            self.train_first_epoch(t, trn_loader)
+            self.train_first_epoch(t, trn_loader, val_loader)
             return
 
-    def train_first_epoch(self, t, trn_loader):
+    def train_first_epoch(self, t, trn_loader, val_loader):
         """ In the first epoch of a task t, calculate means and stds of selector outputs"""
-        selectors_output = torch.full((len(trn_loader.dataset), self.model.selector_features_dim), fill_value=-999999999.0,
+        selectors_output = torch.full((len(trn_loader.dataset) + len(val_loader.dataset), self.model.selector_features_dim), fill_value=-999999999.0,
                                       device=self.model.device)
-        self.model.heads[-1].train()
+
         for i, (images, targets) in enumerate(trn_loader):
             # Forward current model
             bsz = images.shape[0]
@@ -77,28 +129,28 @@ class Appr(Inc_Learning_Appr):
             from_ = i*trn_loader.batch_size
             selectors_output[from_: from_+bsz] = features
 
-        # selectors_output = nn.functional.normalize(x, p=2, dim=1)
+        for i, (images, targets) in enumerate(val_loader):
+            bsz = images.shape[0]
+            features = self.model(images.to(self.device))
+            from_ = len(trn_loader.dataset) + i*val_loader.batch_size
+            selectors_output[from_: from_+bsz] = features
 
+        # Remove outliers
+        median = torch.median(selectors_output, dim=0)[0]
+        dist = torch.cdist(selectors_output, median.unsqueeze(0), p=2).squeeze(1)
+        not_outliers = torch.topk(dist, int(0.99*selectors_output.shape[0]), largest=False, sorted=False)[1]
+        selectors_output = selectors_output[not_outliers]
+
+        # Calculate distribution
         self.model.means[t] = selectors_output.mean(dim=0)
-        # if t == 0:
-        #     self.model.means[t] += 10000
         if self.use_multivariate:
             self.model.covs[t] = torch.cov(selectors_output.T)
-            self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-1, device=self.model.device))
         else:
             self.model.covs[t] = torch.diag(torch.std(selectors_output, dim=0))
-            self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-3, device=self.model.device))
 
+        self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-4, device=self.model.device))
         self.model.task_distributions.append(MultivariateNormal(self.model.means[t], self.model.covs[t]))
         self.model.tasks_learned_so_far = t+1
-
-    def criterion(self, t, outputs, targets):
-        """Returns the loss value"""
-        return torch.nn.functional.cross_entropy(torch.cat(outputs, dim=1), targets)
-
-    def _train_parameters(self):
-        """Includes the necessary weights to the optimizer"""
-        return self.model.heads[-1].parameters()
 
     def eval(self, t, val_loader):
         """Contains the evaluation code"""

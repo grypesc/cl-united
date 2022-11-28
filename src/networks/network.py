@@ -3,7 +3,8 @@ from torch import nn
 from torch.distributions.normal import Normal
 from copy import deepcopy
 
-# from src.networks.resnet import resnet18, resnet34
+from src.networks.resnet import resnet18, resnet34
+
 
 class LLL_Net(nn.Module):
     """Basic class for implementing networks"""
@@ -101,9 +102,10 @@ class Extractor(LLL_Net):
 
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=True)
-        # state_dict = torch.load("networks/best.pth")
-        # self.model = resnet18(state_dict)
-        self.model.fc = nn.Identity()
+        self.model = resnet18(num_classes=50)
+        state_dict = torch.load("networks/best.pth")  # The model is trained on 50 tasks, train set in repo: backbone-factory
+        self.model.load_state_dict(state_dict)
+        self.model.out = nn.Identity()
         for param in self.model.parameters():
             param.requires_grad = False
         self.model.eval()
@@ -123,10 +125,7 @@ class Extractor(LLL_Net):
         """Add a new head with the corresponding number of outputs. Also update the number of classes per task and the
         corresponding offsets. Head is an expert here.
         """
-        self.heads.append(nn.Linear(512, num_outputs))
-        # we re-compute instead of append in case an approach makes changes to the heads
-        self.task_cls = torch.tensor([head.out_features for head in self.heads])
-        self.task_offset = torch.cat([torch.LongTensor(1).zero_(), self.task_cls.cumsum(0)[:-1]])
+        pass
 
     def forward(self, x):
         with torch.no_grad():
@@ -146,14 +145,14 @@ class Extractor(LLL_Net):
 class SelectorHead(nn.Module):
     def __init__(self, out_dim, subset_size):
         super().__init__()
-        self.linear = nn.Identity()
+        # self.linear = nn.Linear(512, out_dim)
         # self.linear.weight.data.uniform_(-1.0, to=1.0)
         # vals = torch.rand_like(self.linear.weight)
         # _, sorted_indices = torch.sort(vals)
         # mask = vals < 0
         # mask.scatter_(1, sorted_indices[:, :subset_size], ~mask)
         # self.linear.weight = torch.nn.Parameter(self.linear.weight * mask)
-        self.linear.requires_grad = False
+        # self.linear.requires_grad = False
 
     def forward(self, x):
         # x = nn.functional.normalize(x, p=2, dim=1)
