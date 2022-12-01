@@ -202,7 +202,7 @@ def main(argv=None):
 
     # Network and Approach instances
     utils.seed_everything(seed=args.seed)
-    if args.approach == "neks":
+    if args.approach == "mvgb":
         net = Extractor(init_model, taskcla, device)
     else:
         net = LLL_Net(init_model, remove_existing_head=not args.keep_existing_head)

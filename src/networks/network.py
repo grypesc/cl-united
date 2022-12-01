@@ -3,7 +3,8 @@ from torch import nn
 from torch.distributions.normal import Normal
 from copy import deepcopy
 
-from src.networks.resnet import resnet18, resnet34
+# from torchvision.models import resnet18
+from src.networks.resnet32_linear_turbo import resnet32
 
 
 class LLL_Net(nn.Module):
@@ -102,16 +103,16 @@ class Extractor(LLL_Net):
 
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=True)
-        self.model = resnet18(num_classes=50)
-        state_dict = torch.load("networks/best.pth")  # The model is trained on 50 tasks, train set in repo: backbone-factory
+        self.model = resnet32(num_classes=50)
+        state_dict = torch.load("networks/best.pth")  # The model is trained on 50 tasks in repo: backbone-factory
         self.model.load_state_dict(state_dict)
-        self.model.out = nn.Identity()
+        self.model.fc = nn.Identity()
         for param in self.model.parameters():
             param.requires_grad = False
         self.model.eval()
 
         self.taskcla = taskcla
-        self.selector_features_dim = 512
+        self.selector_features_dim = 64
         self.subset_size = 10
         self.device = device
         self.head = SelectorHead(self.selector_features_dim, self.subset_size)

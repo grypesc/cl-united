@@ -2,16 +2,10 @@ import time
 
 import numpy as np
 import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
 
 from argparse import ArgumentParser
-from PIL import Image
-from torch.distributions import Normal, MultivariateNormal
-from torch.utils.data import DataLoader
+from torch.distributions import MultivariateNormal
 from .incremental_learning import Inc_Learning_Appr
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).unsqueeze_(0).unsqueeze_(0)
-IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).unsqueeze_(0).unsqueeze_(0)
 
 
 class Appr(Inc_Learning_Appr):
@@ -111,20 +105,7 @@ class Appr(Inc_Learning_Appr):
         for i, (images, targets) in enumerate(trn_loader):
             # Forward current model
             bsz = images.shape[0]
-            # image = images[0].permute(1, 2, 0)
-            # image *= IMAGENET_STD
-            # image += IMAGENET_MEAN
-            # image *= 255
-            # image = Image.fromarray(np.array(image, dtype=np.uint8))
-            # image.save("lol.png")
             features = self.model(images.to(self.device))
-            # loss = self.criterion(t, outputs, targets.to(self.device))
-            # Backward
-
-            # self.optimizer.zero_grad()
-            # loss.backward()
-            # torch.nn.utils.clip_grad_norm_(self._train_parameters(), self.clipgrad)
-            # self.optimizer.step()
 
             from_ = i*trn_loader.batch_size
             selectors_output[from_: from_+bsz] = features
@@ -148,7 +129,7 @@ class Appr(Inc_Learning_Appr):
         else:
             self.model.covs[t] = torch.diag(torch.std(selectors_output, dim=0))
 
-        self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-4, device=self.model.device))
+        # self.model.covs[t] += torch.diag(torch.full((self.model.selector_features_dim,), fill_value=1e-4, device=self.model.device))
         self.model.task_distributions.append(MultivariateNormal(self.model.means[t], self.model.covs[t]))
         self.model.tasks_learned_so_far = t+1
 
