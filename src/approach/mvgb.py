@@ -1,11 +1,50 @@
+import pickle
+import random
 import time
 
 import numpy as np
 import torch
 
 from argparse import ArgumentParser
+
+from torch import nn
 from torch.distributions import MultivariateNormal
+from torch.utils.data import Dataset, DataLoader
 from .incremental_learning import Inc_Learning_Appr
+
+
+class DreamingDataset(torch.utils.data.Dataset):
+    """ Dataset that samples from learned distributions to train head """
+    def __init__(self, distributions, samples):
+        self.distributions = distributions
+        self.samples = samples
+
+    def __len__(self):
+        return self.samples
+
+    def __getitem__(self, index):
+        target = random.randint(0, len(self.distributions)-1)
+        val = self.distributions[target].sample(torch.Size([]))
+        return val, target
+
+class WarmUpScheduler(nn.Module):
+    """Warm-up and exponential decay chain scheduler. If warm_up_iters > 0 than warm-ups linearly for warm_up_iters iterations.
+    Then it decays the learning rate every epoch. It is a good idea to set warm_up_iters as total number of samples in epoch / batch size"""
+
+    def __init__(self, optimizer, warm_up_iters=0, lr_decay=0.97):
+        super().__init__()
+        self.total_steps, self.warm_up_iters = 0, warm_up_iters
+        self.warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 1e-6, total_iters=warm_up_iters) if warm_up_iters else None
+        self.decay_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_decay, last_epoch=-1)
+
+    def step_iter(self):
+        self.total_steps += 1
+        if self.warmup_scheduler:
+            self.warmup_scheduler.step()
+
+    def step_epoch(self):
+        if self.total_steps > self.warm_up_iters:
+            self.decay_scheduler.step()
 
 
 class Appr(Inc_Learning_Appr):
@@ -13,11 +52,18 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, fix_bn=False, eval_on_train=False,
-                 logger=None, use_multivariate=False):
+                 logger=None, use_multivariate=False, load_distributions=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
         self.use_multivariate = use_multivariate
+        self.load_distributions = load_distributions
+        if load_distributions:
+            with open(f"distributions.pickle", 'rb') as f:
+                data_file = pickle.load(f)
+                self.model.task_distributions = data_file["distributions"]
+                self.model.tasks_learned_so_far = len(self.model.task_distributions)
+                self.dream()
 
     @staticmethod
     def extra_parser(args):
@@ -27,71 +73,62 @@ class Appr(Inc_Learning_Appr):
                             help='Use multivariate distribution',
                             action='store_true',
                             default=False)
+        parser.add_argument('--load-distributions',
+                            help='Load distributions from a pickle file',
+                            action='store_true',
+                            default=False)
+        parser.add_argument('--save-distributions',
+                            help='Save distributions to a pickle file',
+                            action='store_true',
+                            default=False)
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
         """Contains the epochs loop"""
-        lr = self.lr
-        best_loss = np.inf
-        patience = self.lr_patience
-        best_model = self.model.get_copy()
-
-        self.optimizer = self._get_optimizer()
+        if self.load_distributions:
+            return
 
         # Loop epochs
+
         for e in range(self.nepochs):
-            # Train
-            clock0 = time.time()
             self.train_epoch(t, trn_loader, val_loader)
-            clock1 = time.time()
-            if self.eval_on_train:
-                train_loss, train_acc, _ = self.eval(t, trn_loader)
-                clock2 = time.time()
-                print('| Epoch {:3d}, time={:5.1f}s/{:5.1f}s | Train: loss={:.3f}, TAw acc={:5.1f}% |'.format(
-                    e + 1, clock1 - clock0, clock2 - clock1, train_loss, 100 * train_acc), end='')
-                self.logger.log_scalar(task=t, iter=e + 1, name="loss", value=train_loss, group="train")
-                self.logger.log_scalar(task=t, iter=e + 1, name="acc", value=100 * train_acc, group="train")
-            else:
-                print('| Epoch {:3d}, time={:5.1f}s | Train: skip eval |'.format(e + 1, clock1 - clock0), end='')
 
-            # Valid
-            clock3 = time.time()
-            valid_loss, valid_acc, _ = self.eval(t, val_loader)
-            clock4 = time.time()
-            print(' Valid: time={:5.1f}s loss={:.3f}, TAw acc={:5.1f}% |'.format(
-                clock4 - clock3, valid_loss, 100 * valid_acc), end='')
-            self.logger.log_scalar(task=t, iter=e + 1, name="loss", value=valid_loss, group="valid")
-            self.logger.log_scalar(task=t, iter=e + 1, name="acc", value=100 * valid_acc, group="valid")
+        # if not self.load_distributions:
+        #     with open(f"distributions.pickle", 'wb') as f:
+        #         pickle.dump({"distributions": self.model.task_distributions}, f)
 
-            # Adapt learning rate - patience scheme - early stopping regularization
-            if valid_loss < best_loss:
-                # if the loss goes down, keep it as the best model and end line with a star ( * )
-                best_loss = valid_loss
-                best_model = self.model.get_copy()
-                patience = self.lr_patience
-                print(' *', end='')
-            else:
-                # if the loss does not go down, decrease patience
-                patience -= 1
-                if patience <= 0:
-                    # if it runs out of patience, reduce the learning rate
-                    lr /= self.lr_factor
-                    print(' lr={:.1e}'.format(lr), end='')
-                    if lr < self.lr_min:
-                        # if the lr decreases below minimum, stop the training session
-                        print()
-                        break
-                    # reset patience and recover best model so far to continue training
-                    patience = self.lr_patience
-                    self.optimizer.param_groups[0]['lr'] = lr
-                    self.model.set_state_dict(best_model)
-            self.logger.log_scalar(task=t, iter=e + 1, name="patience", value=patience, group="train")
-            self.logger.log_scalar(task=t, iter=e + 1, name="lr", value=lr, group="train")
-            print()
-        self.model.set_state_dict(best_model)
+    def dream(self):
+        print("STARTING DREAMING")
+        optimizer = torch.optim.Adam(self.model.model.dreamer.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.90, last_epoch=-1)
+        self.model.model.to(self.device)
+        self.model.model.dreamer.train()
+        ds = DreamingDataset(self.model.task_distributions, 30000)
+        loader = DataLoader(ds, batch_size=64)
+        for epoch in range(50):
+            losses, hits = [], []
+            for input, target in loader:
+                input, target = input.to(self.device), target.to(self.device)
+                bsz = input.shape[0]
+                out = self.model.model.dreamer(input)
+                optimizer.zero_grad()
+                loss = torch.nn.functional.cross_entropy(out, target)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.model.dreamer.parameters(), 1.0)
+                optimizer.step()
+                losses.append(float(loss * bsz))
+                TP = torch.sum(torch.argmax(out, dim=1) == target)
+                hits.append(int(TP))
+            scheduler.step()
+            print(f"Epoch: {epoch}")
+            print(sum(losses) / len(ds), sum(hits) / len(ds))
+
+        self.model.model.dreamer.eval()
 
     def train_epoch(self, t, trn_loader, val_loader):
         """Runs a single epoch"""
+        if self.load_distributions:
+            return
         self.model.eval()
         if not self.model.means[t].detach().all():
             self.train_first_epoch(t, trn_loader, val_loader)
@@ -99,28 +136,32 @@ class Appr(Inc_Learning_Appr):
 
     def train_first_epoch(self, t, trn_loader, val_loader):
         """ In the first epoch of a task t, calculate means and stds of selector outputs"""
-        selectors_output = torch.full((len(trn_loader.dataset) + len(val_loader.dataset), self.model.selector_features_dim), fill_value=-999999999.0,
+        selectors_output = torch.full((2*len(trn_loader.dataset) + 2*len(val_loader.dataset), self.model.selector_features_dim), fill_value=-999999999.0,
                                       device=self.model.device)
 
         for i, (images, targets) in enumerate(trn_loader):
-            # Forward current model
             bsz = images.shape[0]
-            features = self.model(images.to(self.device))
-
-            from_ = i*trn_loader.batch_size
+            images = images.to(self.device)
+            features = self.model(images)
+            from_ = 2*i*trn_loader.batch_size
             selectors_output[from_: from_+bsz] = features
+            features = self.model(torch.flip(images, dims=(3,)))
+            selectors_output[from_+bsz: from_+2*bsz] = features
 
         for i, (images, targets) in enumerate(val_loader):
             bsz = images.shape[0]
-            features = self.model(images.to(self.device))
-            from_ = len(trn_loader.dataset) + i*val_loader.batch_size
+            images = images.to(self.device)
+            features = self.model(images)
+            from_ = 2*len(trn_loader.dataset) + 2*i*val_loader.batch_size
             selectors_output[from_: from_+bsz] = features
+            features = self.model(torch.flip(images, dims=(3,)))
+            selectors_output[from_+bsz: from_+2*bsz] = features
 
         # Remove outliers
-        median = torch.median(selectors_output, dim=0)[0]
-        dist = torch.cdist(selectors_output, median.unsqueeze(0), p=2).squeeze(1)
-        not_outliers = torch.topk(dist, int(0.99*selectors_output.shape[0]), largest=False, sorted=False)[1]
-        selectors_output = selectors_output[not_outliers]
+        # median = torch.median(selectors_output, dim=0)[0]
+        # dist = torch.cdist(selectors_output, median.unsqueeze(0), p=2).squeeze(1)
+        # not_outliers = torch.topk(dist, int(0.99*selectors_output.shape[0]), largest=False, sorted=False)[1]
+        # selectors_output = selectors_output[not_outliers]
 
         # Calculate distribution
         self.model.means[t] = selectors_output.mean(dim=0)
@@ -150,6 +191,10 @@ class Appr(Inc_Learning_Appr):
                 total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
+    def criterion(self, t, outputs, targets):
+        """Returns the loss value"""
+        return torch.nn.functional.cross_entropy(outputs[t], targets - self.model.task_offset[t])
+
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
         pred = torch.zeros_like(targets)
@@ -162,7 +207,7 @@ class Appr(Inc_Learning_Appr):
 
         # WARNING: THIS CALCULATES ACCURACY OF SELECTORS, NOT ACC OF NEKS TASK AGNOSTIC, RESEARCH PURPOSE
         for m in range(len(pred)):
-            this_task = self.model.predict_task(features[m:m+1])
+            this_task = self.model.predict_task_bayes(features[m:m+1])
             pred[m] = this_task
             targets[m] = t
         hits_tag = (pred == targets).float()
@@ -171,3 +216,5 @@ class Appr(Inc_Learning_Appr):
     def _get_optimizer(self):
         """Returns the optimizer"""
         return torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.wd)
+
+
