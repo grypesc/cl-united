@@ -5,6 +5,7 @@ from copy import deepcopy
 
 # from torchvision.models import resnet18
 from src.networks.resnet32_linear_turbo import resnet32
+from src.networks.resnet_linear_turbo import resnet18, resnet50
 
 
 class LLL_Net(nn.Module):
@@ -103,58 +104,46 @@ class Extractor(LLL_Net):
 
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=True)
-        self.model = resnet32(num_classes=50)
-        state_dict = torch.load("networks/best.pth")  # The model is trained on 50 tasks in repo: backbone-factory
-        self.model.load_state_dict(state_dict)
-        self.model.fc = nn.Identity()
-        for param in self.model.parameters():
-            param.requires_grad = False
-        self.model.eval()
+        self.bb = resnet32(num_classes=50)
+        # state_dict = torch.load("networks/best.pth")
+        # self.model.load_state_dict(state_dict, strict=True)
+        self.bb.fc = nn.Identity()
+        for param in self.bb.parameters():
+            param.requires_grad = True
+        self.head = None
 
+        self.task_offset = [0]
         self.taskcla = taskcla
         self.selector_features_dim = 64
         self.subset_size = 10
         self.device = device
-        self.head = SelectorHead(self.selector_features_dim, self.subset_size)
-        tasks_total = len(taskcla)
-        self.means = torch.zeros((tasks_total, self.selector_features_dim), device=device)
-        self.covs = torch.zeros((tasks_total, self.selector_features_dim, self.selector_features_dim), device=device)
         self.task_distributions = []
-        self.model.tasks_learned_so_far = None
 
     def add_head(self, num_outputs):
         """Add a new head with the corresponding number of outputs. Also update the number of classes per task and the
         corresponding offsets. Head is an expert here.
         """
-        pass
+        if self.head:
+            return
+        self.head = nn.Linear(64, num_outputs)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
+        features = self.bb(x)
+        if return_features:
+            return self.head(features), features
+        return self.head(features)
+
+    def predict_task_bayes(self, features):
         with torch.no_grad():
-            features = self.model(x)
-            return self.head(features)
+            log_probs = [self.task_distributions[t].score_samples(features) for t in range(len(self.task_distributions))]
+            log_probs = torch.stack(log_probs, dim=1)
+            task_id = torch.argmax(log_probs, dim=1)
+        return task_id
 
-    def predict_task(self, features):
+    def predict_task_head(self, features):
         if self.tasks_learned_so_far == 1:
             return 0
         with torch.no_grad():
-            log_probs = [self.task_distributions[t].log_prob(features) for t in range(self.tasks_learned_so_far)]
-            log_probs = torch.stack(log_probs, dim=0)
-            task_id = torch.argmax(log_probs)
+            x = self.model.head(features)
+            task_id = torch.argmax(x)
         return task_id
-
-
-class SelectorHead(nn.Module):
-    def __init__(self, out_dim, subset_size):
-        super().__init__()
-        # self.linear = nn.Linear(512, out_dim)
-        # self.linear.weight.data.uniform_(-1.0, to=1.0)
-        # vals = torch.rand_like(self.linear.weight)
-        # _, sorted_indices = torch.sort(vals)
-        # mask = vals < 0
-        # mask.scatter_(1, sorted_indices[:, :subset_size], ~mask)
-        # self.linear.weight = torch.nn.Parameter(self.linear.weight * mask)
-        # self.linear.requires_grad = False
-
-    def forward(self, x):
-        # x = nn.functional.normalize(x, p=2, dim=1)
-        return x

@@ -1,11 +1,13 @@
 import pickle
 import random
-import time
+import copy
 
 import numpy as np
 import torch
 
 from argparse import ArgumentParser
+
+from src.approach.gmm import GaussianMixture
 
 from torch import nn
 from torch.distributions import MultivariateNormal
@@ -15,7 +17,7 @@ from .incremental_learning import Inc_Learning_Appr
 
 
 class ClassDataset(torch.utils.data.Dataset):
-    """ Dataset consisting of samples of the same class """
+    """ Dataset consisting of samples of only one class """
     def __init__(self, images, transforms):
         self.images = images
         self.transforms = transforms
@@ -28,7 +30,7 @@ class ClassDataset(torch.utils.data.Dataset):
         return image
 
 
-class DreamingDataset(torch.utils.data.Dataset):
+class HeadDataset(torch.utils.data.Dataset):
     """ Dataset that samples from learned distributions to train head """
     def __init__(self, distributions, samples):
         self.distributions = distributions
@@ -67,15 +69,18 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
-                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, fix_bn=False, eval_on_train=False,
-                 logger=None, use_multivariate=False, remove_outliers=False, load_distributions=False, save_distributions=False):
+                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 logger=None, gmms=False, use_multivariate=True, remove_outliers=False, load_distributions=False, save_distributions=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
+        self.gmms = gmms
+        self.patience = patience
         self.use_multivariate = use_multivariate
         self.remove_outliers = remove_outliers
         self.load_distributions = load_distributions
         self.save_distributions = save_distributions
+        self.model.to(device)
 
         if load_distributions:
             with open(f"distributions.pickle", 'rb') as f:
@@ -86,10 +91,18 @@ class Appr(Inc_Learning_Appr):
     def extra_parser(args):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
+        parser.add_argument('--gmms',
+                            help='Use Gaussian Mixture of Models distribution',
+                            type=int,
+                            default=1)
+        parser.add_argument('--patience',
+                            help='Early stopping',
+                            type=int,
+                            default=5)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
-                            default=False)
+                            default=True)
         parser.add_argument('--remove-outliers',
                             help='Remove class outliers before creating distribution',
                             action='store_true',
@@ -127,8 +140,8 @@ class Appr(Inc_Learning_Appr):
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.90, last_epoch=-1)
         self.model.model.to(self.device)
         self.model.model.dreamer.train()
-        ds = DreamingDataset(self.model.task_distributions, 30000)
-        loader = DataLoader(ds, batch_size=64)
+        ds = HeadDataset(self.model.task_distributions, 30000)
+        loader = DataLoader(ds, batch_size=512)
         for epoch in range(50):
             losses, hits = [], []
             for input, target in loader:
@@ -150,12 +163,13 @@ class Appr(Inc_Learning_Appr):
         self.model.model.dreamer.eval()
 
     def train_backbone(self, t, trn_loader, val_loader):
-        return
         model = self.model
         optimizer, lr_scheduler = self._get_optimizer()
-        model.train()
+        best_loss, best_epoch, best_model = 1e8, 0, None
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
+            train_hits, val_hits = 0, 0
+            model.train()
             for images, targets in trn_loader:
                 bsz = images.shape[0]
                 images, targets = images.to(self.device), targets.to(self.device)
@@ -166,10 +180,12 @@ class Appr(Inc_Learning_Appr):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
                 optimizer.step()
                 lr_scheduler.step_iter()
+                train_hits += torch.sum((torch.argmax(out, dim=1) == targets))
 
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step_epoch()
 
+            model.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
                     bsz = images.shape[0]
@@ -177,12 +193,28 @@ class Appr(Inc_Learning_Appr):
                     out = model(images)
                     loss = self.criterion(t, out, targets)
 
+                    val_hits += torch.sum((torch.argmax(out, dim=1) == targets))
                     valid_loss.append(float(bsz * loss))
 
-            train_loss = sum(train_loss) / len(train_loss)
-            val_loss = sum(valid_loss) / len(valid_loss)
+            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            valid_loss = sum(valid_loss) / len(val_loader.dataset)
+            train_acc = train_hits / len(trn_loader.dataset)
+            val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2} Val loss: {valid_loss:.2}")
+            if valid_loss < best_loss:
+                best_loss = valid_loss
+                best_epoch = epoch
+                best_model = copy.deepcopy(model)
+
+            if epoch - best_epoch >= self.patience:
+                break
+
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
+                  f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
+
+        print(f"Best epoch: {epoch}")
+        self.model = best_model
+        torch.save(model.bb.state_dict(), "networks/best.pth")
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
@@ -219,14 +251,9 @@ class Appr(Inc_Learning_Appr):
                     class_features = class_features[not_outliers]
 
                 # Calculate distribution
-                means = class_features.mean(dim=0)
-                if self.use_multivariate:
-                    covs = torch.cov(class_features.T)
-                else:
-                    covs = torch.diag(torch.std(class_features, dim=0))
-
-                # covs += torch.diag(torch.full((covs.shape[0],), fill_value=10, device=covs.device))
-                self.model.task_distributions.append(MultivariateNormal(means, covs))
+                gmm = GaussianMixture(1, class_features.shape[1], eps=1e-8).to(self.device)
+                gmm.fit(class_features)
+                self.model.task_distributions.append(gmm)
 
     def eval(self, t, val_loader):
         """Contains the evaluation code"""
@@ -251,7 +278,6 @@ class Appr(Inc_Learning_Appr):
 
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
-        pred = torch.zeros_like(targets)
 
         # Task-Aware Multi-Head
         # for m in range(len(pred)):
@@ -260,10 +286,7 @@ class Appr(Inc_Learning_Appr):
         hits_taw = (targets == targets).float()
 
         # WARNING: THIS CALCULATES ACCURACY OF SELECTORS, NOT ACC OF NEKS TASK AGNOSTIC, RESEARCH PURPOSE
-        for m in range(len(pred)):
-            this_task = self.model.predict_task_bayes(features[m:m+1])
-            pred[m] = this_task
-            targets[m] = t
+        pred = self.model.predict_task_bayes(features)
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
 
