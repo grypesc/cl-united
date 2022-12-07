@@ -105,8 +105,8 @@ class Extractor(LLL_Net):
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=True)
         self.bb = resnet32(num_classes=50)
-        # state_dict = torch.load("networks/best.pth")
-        # self.model.load_state_dict(state_dict, strict=True)
+        # state_dict = torch.load("networks/best2.pth")
+        # self.bb.load_state_dict(state_dict, strict=False)
         self.bb.fc = nn.Identity()
         for param in self.bb.parameters():
             param.requires_grad = True
@@ -114,7 +114,6 @@ class Extractor(LLL_Net):
 
         self.task_offset = [0]
         self.taskcla = taskcla
-        self.selector_features_dim = 64
         self.subset_size = 10
         self.device = device
         self.task_distributions = []
@@ -133,17 +132,3 @@ class Extractor(LLL_Net):
             return self.head(features), features
         return self.head(features)
 
-    def predict_task_bayes(self, features):
-        with torch.no_grad():
-            log_probs = [self.task_distributions[t].score_samples(features) for t in range(len(self.task_distributions))]
-            log_probs = torch.stack(log_probs, dim=1)
-            task_id = torch.argmax(log_probs, dim=1)
-        return task_id
-
-    def predict_task_head(self, features):
-        if self.tasks_learned_so_far == 1:
-            return 0
-        with torch.no_grad():
-            x = self.model.head(features)
-            task_id = torch.argmax(x)
-        return task_id

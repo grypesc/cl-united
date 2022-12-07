@@ -1,18 +1,15 @@
+import copy
 import pickle
 import random
-import copy
-
 import numpy as np
 import torch
 
 from argparse import ArgumentParser
-
-from src.approach.gmm import GaussianMixture
-
 from torch import nn
-from torch.distributions import MultivariateNormal
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import Compose
+
+from src.approach.gmm import GaussianMixture
 from .incremental_learning import Inc_Learning_Appr
 
 
@@ -81,11 +78,12 @@ class Appr(Inc_Learning_Appr):
         self.load_distributions = load_distributions
         self.save_distributions = save_distributions
         self.model.to(device)
+        self.task_distributions = []
 
         if load_distributions:
             with open(f"distributions.pickle", 'rb') as f:
                 data_file = pickle.load(f)
-                self.model.task_distributions = data_file["distributions"]
+                self.task_distributions = data_file["distributions"]
 
     @staticmethod
     def extra_parser(args):
@@ -118,8 +116,6 @@ class Appr(Inc_Learning_Appr):
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
-        """Contains the epochs loop"""
-
         # Train backbone
         if t == 0:
             self.train_backbone(t, trn_loader, val_loader)
@@ -130,13 +126,13 @@ class Appr(Inc_Learning_Appr):
         # Dump distributions
         if self.save_distributions:
             with open(f"distributions.pickle", 'wb') as f:
-                pickle.dump({"distributions": self.model.task_distributions}, f)
+                pickle.dump({"distributions": self.task_distributions}, f)
 
     def train_head(self):
         optimizer, scheduler = self._get_optimizer()
         self.model.model.to(self.device)
         self.model.model.dreamer.train()
-        ds = HeadDataset(self.model.task_distributions, 30000)
+        ds = HeadDataset(self.task_distributions, 30000)
         loader = DataLoader(ds, batch_size=512)
         for epoch in range(50):
             losses, hits = [], []
@@ -228,7 +224,7 @@ class Appr(Inc_Learning_Appr):
                 val_indices = torch.tensor(val_loader.dataset.labels) == c
                 ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
                 ds = ClassDataset(ds, transforms)
-                loader = torch.utils.data.DataLoader(ds, batch_size=64, num_workers=0, shuffle=False)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
                 from_ = 0
                 class_features = torch.full((2 * len(ds), 64), fill_value=-999999999.0, device=self.model.device)
                 for images in loader:
@@ -250,7 +246,7 @@ class Appr(Inc_Learning_Appr):
                 cov_type = "full" if self.use_multivariate else "diag"
                 gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=1e-8).to(self.device)
                 gmm.fit(class_features, delta=1e-3, n_iter=100)
-                self.model.task_distributions.append(gmm)
+                self.task_distributions.append(gmm)
 
     def eval(self, t, val_loader):
         """Contains the evaluation code"""
@@ -271,7 +267,7 @@ class Appr(Inc_Learning_Appr):
 
     def criterion(self, t, outputs, targets):
         """Returns the loss value"""
-        return nn.functional.cross_entropy(outputs, targets, label_smoothing=0.1)
+        return nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
 
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
@@ -282,10 +278,22 @@ class Appr(Inc_Learning_Appr):
         #     pred[m] = outputs[this_task][m].argmax() + self.model.task_offset[this_task]
         hits_taw = (targets == targets).float()
 
-        # WARNING: THIS CALCULATES ACCURACY OF SELECTORS, NOT ACC OF NEKS TASK AGNOSTIC, RESEARCH PURPOSE
-        pred = self.model.predict_task_bayes(features)
+        pred = self.predict_class_bayes(features)
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
+
+    def predict_class_bayes(self, features):
+        with torch.no_grad():
+            log_probs = [self.task_distributions[t].score_samples(features) for t in range(len(self.task_distributions))]
+            log_probs = torch.stack(log_probs, dim=1)
+            class_id = torch.argmax(log_probs, dim=1)
+        return class_id
+
+    def predict_class_head(self, features):
+        with torch.no_grad():
+            x = self.model.head(features)
+            class_id = torch.argmax(x)
+        return class_id
 
     def _get_optimizer(self):
         """Returns the optimizer"""
