@@ -70,7 +70,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, gmms=False, use_multivariate=True, remove_outliers=False, load_distributions=False, save_distributions=False):
+                 logger=None, gmms=1, use_multivariate=True, remove_outliers=False, load_distributions=False, save_distributions=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -92,7 +92,7 @@ class Appr(Inc_Learning_Appr):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
         parser.add_argument('--gmms',
-                            help='Use Gaussian Mixture of Models distribution',
+                            help='Number of gaussian models in the mixture',
                             type=int,
                             default=1)
         parser.add_argument('--patience',
@@ -102,7 +102,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
-                            default=True)
+                            default=False)
         parser.add_argument('--remove-outliers',
                             help='Remove class outliers before creating distribution',
                             action='store_true',
@@ -119,8 +119,6 @@ class Appr(Inc_Learning_Appr):
 
     def train_loop(self, t, trn_loader, val_loader):
         """Contains the epochs loop"""
-        if self.load_distributions:
-            return
 
         # Train backbone
         if t == 0:
@@ -134,10 +132,8 @@ class Appr(Inc_Learning_Appr):
             with open(f"distributions.pickle", 'wb') as f:
                 pickle.dump({"distributions": self.model.task_distributions}, f)
 
-    def dream(self):
-        print("STARTING DREAMING")
-        optimizer = torch.optim.Adam(self.model.model.dreamer.parameters(), lr=1e-3)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.90, last_epoch=-1)
+    def train_head(self):
+        optimizer, scheduler = self._get_optimizer()
         self.model.model.to(self.device)
         self.model.model.dreamer.train()
         ds = HeadDataset(self.model.task_distributions, 30000)
@@ -180,7 +176,7 @@ class Appr(Inc_Learning_Appr):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
                 optimizer.step()
                 lr_scheduler.step_iter()
-                train_hits += torch.sum((torch.argmax(out, dim=1) == targets))
+                train_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
 
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step_epoch()
@@ -193,7 +189,7 @@ class Appr(Inc_Learning_Appr):
                     out = model(images)
                     loss = self.criterion(t, out, targets)
 
-                    val_hits += torch.sum((torch.argmax(out, dim=1) == targets))
+                    val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
@@ -214,7 +210,7 @@ class Appr(Inc_Learning_Appr):
 
         print(f"Best epoch: {epoch}")
         self.model = best_model
-        torch.save(model.bb.state_dict(), "networks/best.pth")
+        torch.save(self.model.bb.state_dict(), "networks/best.pth")
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
@@ -250,9 +246,10 @@ class Appr(Inc_Learning_Appr):
                     not_outliers = torch.topk(dist, int(0.99*class_features.shape[0]), largest=False, sorted=False)[1]
                     class_features = class_features[not_outliers]
 
-                # Calculate distribution
-                gmm = GaussianMixture(1, class_features.shape[1], eps=1e-8).to(self.device)
-                gmm.fit(class_features)
+                # Calculate distributions
+                cov_type = "full" if self.use_multivariate else "diag"
+                gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=1e-8).to(self.device)
+                gmm.fit(class_features, delta=1e-3, n_iter=100)
                 self.model.task_distributions.append(gmm)
 
     def eval(self, t, val_loader):
@@ -293,6 +290,6 @@ class Appr(Inc_Learning_Appr):
     def _get_optimizer(self):
         """Returns the optimizer"""
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.wd)
-        scheduler = WarmUpScheduler(optimizer, 100, 0.95)
+        scheduler = WarmUpScheduler(optimizer, 100, 0.96)
         return optimizer, scheduler
 
