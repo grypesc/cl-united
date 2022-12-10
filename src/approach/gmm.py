@@ -209,12 +209,12 @@ class GaussianMixture(torch.nn.Module):
             x:          torch.Tensor (n, d)
             y:          torch.Tensor (n)
         """
-        counts = torch.distributions.multinomial.Multinomial(total_count=n, probs=self.pi.squeeze()).sample()
+        counts = torch.distributions.multinomial.Multinomial(total_count=n, probs=self.pi.squeeze(0).squeeze(1)).sample()
         x = torch.empty(0, device=counts.device)
         y = torch.cat([torch.full([int(sample)], j, device=counts.device) for j, sample in enumerate(counts)])
 
         # Only iterate over components with non-zero counts
-        for k in np.arange(self.n_components)[counts > 0]:
+        for k in torch.arange(0, self.n_components, device=counts.device)[counts > 0]:
             if self.covariance_type == "diag":
                 x_k = self.mu[0, k] + torch.randn(int(counts[k]), self.n_features, device=x.device) * torch.sqrt(self.var[0, k])
             elif self.covariance_type == "full":

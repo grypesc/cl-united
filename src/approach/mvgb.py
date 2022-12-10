@@ -13,6 +13,34 @@ from src.approach.gmm import GaussianMixture
 from .incremental_learning import Inc_Learning_Appr
 
 
+class DistributionsAnalyzer:
+    def __init__(self):
+        self.total_samples = 0
+        self.class_dict = {}
+        self.class_size = {}
+
+    def add(self, c, features):
+        self.class_dict[c] = features
+        self.class_size[c] = len(features)
+
+    def plot(self):
+        data = [f for f in self.class_dict.values()]
+        data = torch.cat(data, dim=0)
+        data = np.array(data)
+        model = PCA(n_components=3)
+        data = model.fit_transform(data)
+        fig = plt.figure()
+        ax = fig.add_subplot(projection='3d')
+        from_ = 0
+        class_to_visualize = 51
+        for i, c in enumerate(self.class_dict.keys()):
+            lol = data[from_:from_ + self.class_size[c]][:30]
+            ax.scatter(lol[:, 0], lol[:, 1], lol[:, 2], c="b" if c != class_to_visualize else "r")
+            from_ += self.class_size[c]
+        plt.show()
+        print("lol")
+
+
 class ClassDataset(torch.utils.data.Dataset):
     """ Dataset consisting of samples of only one class """
     def __init__(self, images, transforms):
@@ -27,7 +55,7 @@ class ClassDataset(torch.utils.data.Dataset):
         return image
 
 
-class HeadDataset(torch.utils.data.Dataset):
+class DistributionDataset(torch.utils.data.Dataset):
     """ Dataset that samples from learned distributions to train head """
     def __init__(self, distributions, samples):
         self.distributions = distributions
@@ -38,7 +66,7 @@ class HeadDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         target = random.randint(0, len(self.distributions)-1)
-        val = self.distributions[target].sample(torch.Size([]))
+        val = self.distributions[target].sample(1)[0].squeeze(0)
         return val, target
 
 
@@ -67,18 +95,20 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, gmms=1, use_multivariate=True, remove_outliers=False, load_distributions=False, save_distributions=False):
+                 logger=None, gmms=1, use_multivariate=True, use_head=False, remove_outliers=False, load_distributions=False, save_distributions=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
         self.gmms = gmms
         self.patience = patience
         self.use_multivariate = use_multivariate
+        self.use_head = use_head
         self.remove_outliers = remove_outliers
         self.load_distributions = load_distributions
         self.save_distributions = save_distributions
         self.model.to(device)
         self.task_distributions = []
+        self.analyzer = DistributionsAnalyzer()
 
         if load_distributions:
             with open(f"distributions.pickle", 'rb') as f:
@@ -101,6 +131,10 @@ class Appr(Inc_Learning_Appr):
                             help='Use multivariate distribution',
                             action='store_true',
                             default=False)
+        parser.add_argument('--use-head',
+                            help='Use trainable head instead of Bayesian inference',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--remove-outliers',
                             help='Remove class outliers before creating distribution',
                             action='store_true',
@@ -118,10 +152,17 @@ class Appr(Inc_Learning_Appr):
     def train_loop(self, t, trn_loader, val_loader):
         # Train backbone
         if t == 0:
+            print(f"Training backbone on task {t}:")
             self.train_backbone(t, trn_loader, val_loader)
 
         # Create distributions
+        print(f"Creating distributions for task {t}:")
         self.create_distributions(t, trn_loader, val_loader)
+
+        # Train head
+        if self.use_head:
+            print(f"Training head for task {t}:")
+            self.train_head()
 
         # Dump distributions
         if self.save_distributions:
@@ -129,30 +170,35 @@ class Appr(Inc_Learning_Appr):
                 pickle.dump({"distributions": self.task_distributions}, f)
 
     def train_head(self):
-        optimizer, scheduler = self._get_optimizer()
-        self.model.model.to(self.device)
-        self.model.model.dreamer.train()
-        ds = HeadDataset(self.task_distributions, 30000)
-        loader = DataLoader(ds, batch_size=512)
-        for epoch in range(50):
+        self.model.bb.eval()
+        self.model.freeze_backbone()
+        self.model.replace_head(len(self.task_distributions))
+        self.model.head.train()
+        self.model.to(self.device)
+        optimizer = torch.optim.Adam(self.model.head.parameters(), lr=self.lr, weight_decay=0)
+        scheduler = WarmUpScheduler(optimizer, 100, 0.85)
+        ds = DistributionDataset(self.task_distributions, 10000)
+        loader = DataLoader(ds, batch_size=64, num_workers=0)
+        for epoch in range(30):
             losses, hits = [], []
             for input, target in loader:
                 input, target = input.to(self.device), target.to(self.device)
                 bsz = input.shape[0]
-                out = self.model.model.dreamer(input)
                 optimizer.zero_grad()
+                out = self.model.head(input)
                 loss = torch.nn.functional.cross_entropy(out, target)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.model.dreamer.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.head.parameters(), 1.0)
                 optimizer.step()
                 losses.append(float(loss * bsz))
                 TP = torch.sum(torch.argmax(out, dim=1) == target)
                 hits.append(int(TP))
-            scheduler.step()
+                scheduler.step_iter()
+            scheduler.step_epoch()
             print(f"Epoch: {epoch}")
-            print(sum(losses) / len(ds), sum(hits) / len(ds))
+            print(f"Loss:{sum(losses) / len(ds):.2f}, Acc: {sum(hits) / len(ds):.2f}")
 
-        self.model.model.dreamer.eval()
+        self.model.head.eval()
 
     def train_backbone(self, t, trn_loader, val_loader):
         model = self.model
@@ -210,7 +256,6 @@ class Appr(Inc_Learning_Appr):
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
-        print("Creating distributions:")
         self.model.eval()
         with torch.no_grad():
             classes = self.model.taskcla[t][1]
@@ -278,9 +323,14 @@ class Appr(Inc_Learning_Appr):
         #     pred[m] = outputs[this_task][m].argmax() + self.model.task_offset[this_task]
         hits_taw = (targets == targets).float()
 
-        pred = self.predict_class_bayes(features)
+        pred = self.predict_class(features)
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
+
+    def predict_class(self, features):
+        if self.use_head:
+            return self.predict_class_head(features)
+        return self.predict_class_bayes(features)
 
     def predict_class_bayes(self, features):
         with torch.no_grad():
@@ -292,7 +342,7 @@ class Appr(Inc_Learning_Appr):
     def predict_class_head(self, features):
         with torch.no_grad():
             x = self.model.head(features)
-            class_id = torch.argmax(x)
+            class_id = torch.argmax(x, dim=1)
         return class_id
 
     def _get_optimizer(self):

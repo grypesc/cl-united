@@ -105,12 +105,13 @@ class Extractor(LLL_Net):
     def __init__(self, backbone, taskcla, device):
         super().__init__(backbone, remove_existing_head=True)
         self.bb = resnet32(num_classes=50)
+        # self.model = None
         # state_dict = torch.load("networks/best2.pth")
         # self.bb.load_state_dict(state_dict, strict=False)
         self.bb.fc = nn.Identity()
         for param in self.bb.parameters():
             param.requires_grad = True
-        self.head = None
+        self.head = nn.Identity()
 
         self.task_offset = [0]
         self.taskcla = taskcla
@@ -119,12 +120,11 @@ class Extractor(LLL_Net):
         self.task_distributions = []
 
     def add_head(self, num_outputs):
-        """Add a new head with the corresponding number of outputs. Also update the number of classes per task and the
-        corresponding offsets. Head is an expert here.
-        """
-        if self.head:
-            return
-        self.head = nn.Linear(64, num_outputs)
+        pass
+
+    def replace_head(self, num_outputs):
+        """ Replace the head with new one."""
+        self.head = nn.Sequential(nn.Linear(64, 256, bias=False), nn.ReLU(), nn.Linear(256, num_outputs, bias=False))
 
     def forward(self, x, return_features=False):
         features = self.bb(x)
@@ -132,3 +132,7 @@ class Extractor(LLL_Net):
             return self.head(features), features
         return self.head(features)
 
+    def freeze_backbone(self):
+        """Freeze all parameters from the main model, but not the heads"""
+        for param in self.bb.parameters():
+            param.requires_grad = False
