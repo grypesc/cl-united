@@ -4,8 +4,8 @@ from torch.distributions.normal import Normal
 from copy import deepcopy
 
 # from torchvision.models import resnet18
-from src.networks.resnet32_linear_turbo import resnet32
-from src.networks.resnet_linear_turbo import resnet18, resnet50
+from .resnet32_linear_turbo import resnet32
+from .resnet_linear_turbo import resnet18, resnet50
 
 
 class LLL_Net(nn.Module):
@@ -108,7 +108,7 @@ class Extractor(LLL_Net):
         # self.model = None
         # state_dict = torch.load("networks/best2.pth")
         # self.bb.load_state_dict(state_dict, strict=False)
-        self.bb.fc = nn.Identity()
+        # self.bb.fc = nn.Identity()
         for param in self.bb.parameters():
             param.requires_grad = True
         self.head = nn.Identity()

@@ -9,7 +9,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import Compose
 
-from src.approach.gmm import GaussianMixture
+from .gmm import GaussianMixture
 from .incremental_learning import Inc_Learning_Appr
 
 
@@ -252,6 +252,7 @@ class Appr(Inc_Learning_Appr):
 
         print(f"Best epoch: {epoch}")
         self.model = best_model
+        self.model.bb.fc = nn.Identity()
         torch.save(self.model.bb.state_dict(), "networks/best.pth")
 
     def create_distributions(self, t, trn_loader, val_loader):
