@@ -57,15 +57,22 @@ class ClassDataset(torch.utils.data.Dataset):
 
 class DistributionDataset(torch.utils.data.Dataset):
     """ Dataset that samples from learned distributions to train head """
-    def __init__(self, distributions, samples):
+    def __init__(self, distributions, samples, task_cla, tasks_known):
         self.distributions = distributions
         self.samples = samples
+        self.task_cla = task_cla
+        task_offset = [c[1] for c in task_cla]
+        for i, c in enumerate(task_offset[1:]):
+            task_offset[i+1] += task_offset[i]
+        self.task_offset = [0] + task_offset
+        self.tasks_known = tasks_known
 
     def __len__(self):
         return self.samples
 
     def __getitem__(self, index):
-        target = random.randint(0, len(self.distributions)-1)
+        t = random.randint(0, self.tasks_known)
+        target = random.randint(self.task_offset[t], self.task_offset[t+1]-1)
         val = self.distributions[target].sample(1)[0].squeeze(0)
         return val, target
 
@@ -162,14 +169,14 @@ class Appr(Inc_Learning_Appr):
         # Train head
         if self.use_head:
             print(f"Training head for task {t}:")
-            self.train_head()
+            self.train_head(t)
 
         # Dump distributions
         if self.save_distributions:
             with open(f"distributions.pickle", 'wb') as f:
                 pickle.dump({"distributions": self.task_distributions}, f)
 
-    def train_head(self):
+    def train_head(self, t):
         self.model.bb.eval()
         self.model.freeze_backbone()
         self.model.replace_head(len(self.task_distributions))
@@ -177,9 +184,9 @@ class Appr(Inc_Learning_Appr):
         self.model.to(self.device)
         optimizer = torch.optim.Adam(self.model.head.parameters(), lr=self.lr, weight_decay=0)
         scheduler = WarmUpScheduler(optimizer, 100, 0.85)
-        ds = DistributionDataset(self.task_distributions, 10000)
+        ds = DistributionDataset(self.task_distributions, 10000, self.model.taskcla, t)
         loader = DataLoader(ds, batch_size=64, num_workers=0)
-        for epoch in range(30):
+        for epoch in range(20):
             losses, hits = [], []
             for input, target in loader:
                 input, target = input.to(self.device), target.to(self.device)

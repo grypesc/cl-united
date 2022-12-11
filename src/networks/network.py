@@ -1,11 +1,10 @@
 import torch
 from torch import nn
-from torch.distributions.normal import Normal
 from copy import deepcopy
 
 # from torchvision.models import resnet18
 from .resnet32_linear_turbo import resnet32
-from .resnet_linear_turbo import resnet18, resnet50
+# from .resnet_linear_turbo import resnet18, resnet50
 
 
 class LLL_Net(nn.Module):
@@ -115,7 +114,6 @@ class Extractor(LLL_Net):
 
         self.task_offset = [0]
         self.taskcla = taskcla
-        self.subset_size = 10
         self.device = device
         self.task_distributions = []
 
