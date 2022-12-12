@@ -260,7 +260,7 @@ class Appr(Inc_Learning_Appr):
         print(f"Best epoch: {epoch}")
         self.model = best_model
         self.model.bb.fc = nn.Identity()
-        torch.save(self.model.bb.state_dict(), "networks/best.pth")
+        torch.save(self.model.bb.state_dict(), "best.pth")
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
