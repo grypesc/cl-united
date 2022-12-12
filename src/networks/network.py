@@ -4,7 +4,7 @@ from copy import deepcopy
 
 # from torchvision.models import resnet18
 from .resnet32_linear_turbo import resnet32
-# from .resnet_linear_turbo import resnet18, resnet50
+from .resnet_linear_turbo import resnet18, resnet34, resnet50
 
 
 class LLL_Net(nn.Module):
@@ -101,10 +101,25 @@ class LLL_Net(nn.Module):
 
 class Extractor(LLL_Net):
 
-    def __init__(self, backbone, taskcla, device):
-        super().__init__(backbone, remove_existing_head=True)
-        self.bb = resnet32(num_classes=50)
-        # self.model = None
+    def __init__(self, backbone, taskcla, network_type, device):
+        super().__init__(backbone, remove_existing_head=False)
+        self.model = None
+        self.num_features = 64
+        if network_type == "resnet18":
+            self.bb = resnet18(num_classes=taskcla[0][1], )
+            self.num_features = 128
+        elif network_type == "resnet34":
+            self.bb = resnet34(num_classes=taskcla[0][1])
+            self.num_features = 128
+        elif network_type == "resnet50":
+            self.bb = resnet50(num_classes=taskcla[0][1])
+            self.num_features = 128
+        elif network_type == "resnet32":
+            self.bb = resnet32(num_classes=taskcla[0][1])
+        else:
+            print("This network is not supported by MVGB, using resnet32.")
+            self.bb = resnet32(num_classes=taskcla[0][1])
+
         # state_dict = torch.load("networks/best2.pth")
         # self.bb.load_state_dict(state_dict, strict=False)
         # self.bb.fc = nn.Identity()

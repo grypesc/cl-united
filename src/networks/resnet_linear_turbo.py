@@ -269,8 +269,8 @@ class ResNet(nn.Module):
                                        dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.bottleneck = nn.Linear(512 * last_block.expansion, 64)
-        self.fc = nn.Linear(64, num_classes)
+        self.bottleneck = nn.Linear(512 * last_block.expansion, 128)
+        self.fc = nn.Linear(128, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):

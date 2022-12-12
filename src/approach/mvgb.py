@@ -5,6 +5,8 @@ import numpy as np
 import torch
 
 from argparse import ArgumentParser
+from itertools import compress
+from PIL import Image
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import Compose
@@ -41,7 +43,7 @@ class DistributionsAnalyzer:
         print("lol")
 
 
-class ClassDataset(torch.utils.data.Dataset):
+class ClassMemoryDataset(torch.utils.data.Dataset):
     """ Dataset consisting of samples of only one class """
     def __init__(self, images, transforms):
         self.images = images
@@ -51,7 +53,23 @@ class ClassDataset(torch.utils.data.Dataset):
         return self.images.shape[0]
 
     def __getitem__(self, index):
-        image = self.transforms(self.images[index].copy())
+        image = Image.fromarray(self.images[index])
+        image = self.transforms(image)
+        return image
+
+
+class ClassDirectoryDataset(torch.utils.data.Dataset):
+    """ Dataset consisting of samples of only one class loaded from disc """
+    def __init__(self, images, transforms):
+        self.images = images
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, index):
+        image = Image.open(self.images[index]).convert('RGB')
+        image = self.transforms(image)
         return image
 
 
@@ -269,17 +287,23 @@ class Appr(Inc_Learning_Appr):
             classes = self.model.taskcla[t][1]
             self.model.task_offset.append(self.model.task_offset[-1] + classes)
             transforms = Compose([t for t in val_loader.dataset.transform.transforms
-                                  if "ToTensor" in t.__class__.__name__
+                                  if "CenterCrop" in t.__class__.__name__
+                                  or "ToTensor" in t.__class__.__name__
                                   or "Normalize" in t.__class__.__name__])
             for c in range(classes):
                 c = c + self.model.task_offset[t]
                 train_indices = torch.tensor(trn_loader.dataset.labels) == c
                 val_indices = torch.tensor(val_loader.dataset.labels) == c
-                ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
-                ds = ClassDataset(ds, transforms)
+                if isinstance(trn_loader.dataset.images, list):
+                    train_images = list(compress(trn_loader.dataset.images, train_indices))
+                    val_images = list(compress(val_loader.dataset.images, val_indices))
+                    ds = ClassDirectoryDataset(train_images + val_images, transforms)
+                else:
+                    ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
+                    ds = ClassMemoryDataset(ds, transforms)
                 loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
                 from_ = 0
-                class_features = torch.full((2 * len(ds), 64), fill_value=-999999999.0, device=self.model.device)
+                class_features = torch.full((2 * len(ds), self.model.num_features), fill_value=-999999999.0, device=self.model.device)
                 for images in loader:
                     bsz = images.shape[0]
                     images = images.to(self.device)
