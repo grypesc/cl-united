@@ -106,7 +106,7 @@ class Extractor(LLL_Net):
         self.model = None
         self.num_features = 64
         if network_type == "resnet18":
-            self.bb = resnet18(num_classes=taskcla[0][1], )
+            self.bb = resnet18(num_classes=taskcla[0][1])
             self.num_features = 128
         elif network_type == "resnet34":
             self.bb = resnet34(num_classes=taskcla[0][1])
@@ -149,3 +149,45 @@ class Extractor(LLL_Net):
         """Freeze all parameters from the main model, but not the heads"""
         for param in self.bb.parameters():
             param.requires_grad = False
+
+
+class ExtractorEnsemble(LLL_Net):
+
+    def __init__(self, backbone, taskcla, network_type, device):
+        super().__init__(backbone, remove_existing_head=False)
+        self.model = None
+        self.num_features = 64
+        self.network_type = network_type
+        if network_type == "resnet18":
+            bb = resnet18(num_classes=taskcla[0][1])
+            self.num_features = 128
+        elif network_type == "resnet34":
+            bb = resnet34(num_classes=taskcla[0][1])
+            self.num_features = 128
+        elif network_type == "resnet50":
+            bb = resnet50(num_classes=taskcla[0][1])
+            self.num_features = 128
+        elif network_type == "resnet32":
+            bb = resnet32(num_classes=taskcla[0][1])
+        else:
+            print("This network is not supported by EGE, using resnet32.")
+            bb = resnet32(num_classes=taskcla[0][1])
+
+        self.bbs = nn.ModuleList([bb])
+        self.head = nn.Identity()
+
+        self.task_offset = [0]
+        self.taskcla = taskcla
+        self.device = device
+
+    def add_head(self, num_outputs):
+        pass
+
+    def forward(self, x):
+        semi_features = self.bbs[0].calculate_semi_features(x)
+        features = [bb.forward_semi_features(semi_features) for bb in self.bbs]
+        return torch.stack(features)
+
+    def freeze_backbone(self):
+        """Freeze all parameters from the main model, but not the heads"""
+        pass

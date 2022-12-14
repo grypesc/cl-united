@@ -127,6 +127,18 @@ class ResNet(nn.Module):
         x = self.fc(x)
         return x
 
+    def calculate_semi_features(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.layer1(x)
+        return x
+
+    def forward_semi_features(self, x):
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = torch.mean(x, dim=(2, 3))
+        x = self.fc(x)
+        return x
+
 
 def resnet32(pretrained=False, **kwargs):
     if pretrained:
