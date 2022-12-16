@@ -97,9 +97,12 @@ class Appr(Inc_Learning_Appr):
             self.model.bbs.append(copy.deepcopy(self.model.bbs[-1]))
             model = self.model.bbs[t]
             for name, param in model.named_parameters(): #TODO: LOLZ
-                param.requires_grad = True
+                param.requires_grad = False
+                if "layer2" in name or "layer3" in name or "layer4" in name:
+                    param.requires_grad = True
                 model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
 
+        model.to(self.device)
         optimizer, lr_scheduler = self._get_optimizer()
         best_loss, best_epoch, best_model = 1e8, 0, None
         for epoch in range(self.nepochs):
@@ -181,9 +184,9 @@ class Appr(Inc_Learning_Appr):
                     for images in loader:
                         bsz = images.shape[0]
                         images = images.to(self.device)
-                        _, features = model(images, return_features=True)
+                        features = model(images)
                         class_features[from_: from_+bsz] = features
-                        _, features = model(torch.flip(images, dims=(3,)), return_features=True)
+                        features = model(torch.flip(images, dims=(3,)))
                         class_features[from_+bsz: from_+2*bsz] = features
                         from_ += 2*bsz
 
@@ -207,7 +210,7 @@ class Appr(Inc_Learning_Appr):
             for images, targets in val_loader:
                 targets = targets.to(self.device)
                 # Forward current model
-                _, features = self.model(images.to(self.device), return_features=True)
+                features = self.model(images.to(self.device))
                 hits_taw, hits_tag = self.calculate_metrics(features, targets, t)
                 # Log
                 total_loss = 0
@@ -239,12 +242,13 @@ class Appr(Inc_Learning_Appr):
     def predict_class_bayes(self, features):
         with torch.no_grad():
             confidences = torch.zeros((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), device=features.device)
+            mask = torch.full_like(confidences, fill_value=False)
             for t, _ in enumerate(self.task_distributions):
                 for c, class_gmm in enumerate(self.task_distributions[t]):
                     confidences[:, t, c] = class_gmm.score_samples(features)
+                    mask[:, t, c] = True
 
-            raise Exception("chuj")
-            log_probs = torch.stack(log_probs, dim=1)
+            log_probs = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
             class_id = torch.argmax(log_probs, dim=1)
         return class_id
 

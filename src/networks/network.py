@@ -186,7 +186,7 @@ class ExtractorEnsemble(LLL_Net):
     def forward(self, x):
         semi_features = self.bbs[0].calculate_semi_features(x)
         features = [bb.forward_semi_features(semi_features) for bb in self.bbs]
-        return torch.stack(features)
+        return torch.stack(features, dim=1)
 
     def freeze_backbone(self):
         """Freeze all parameters from the main model, but not the heads"""
