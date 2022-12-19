@@ -275,7 +275,7 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
 
-        print(f"Best epoch: {epoch}")
+        print(f"Best epoch: {best_epoch}")
         self.model = best_model
         self.model.bb.fc = nn.Identity()
         torch.save(self.model.bb.state_dict(), "best.pth")
@@ -349,12 +349,15 @@ class Appr(Inc_Learning_Appr):
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
 
-        # Task-Aware Multi-Head
-        # for m in range(len(pred)):
-        #     this_task = t
-        #     pred[m] = outputs[this_task][m].argmax() + self.model.task_offset[this_task]
-        hits_taw = (targets == targets).float()
+        # Task-Aware
+        classes = self.model.task_offset[t+1] - self.model.task_offset[t]
+        log_probs = [self.task_distributions[t].score_samples(features) for
+                     t in range(self.model.task_offset[t], self.model.task_offset[t] + classes)]
+        log_probs = torch.stack(log_probs, dim=1)
+        class_id = torch.argmax(log_probs, dim=1) + self.model.task_offset[t]
+        hits_taw = (class_id == targets).float()
 
+        # Task-Agnostic
         pred = self.predict_class(features)
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
@@ -379,7 +382,7 @@ class Appr(Inc_Learning_Appr):
 
     def _get_optimizer(self):
         """Returns the optimizer"""
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.wd)
         scheduler = WarmUpScheduler(optimizer, 100, 0.96)
         return optimizer, scheduler
 

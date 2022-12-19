@@ -96,20 +96,21 @@ class Appr(Inc_Learning_Appr):
         else:
             self.model.bbs.append(copy.deepcopy(self.model.bbs[-1]))
             model = self.model.bbs[t]
-            for name, param in model.named_parameters(): #TODO: LOLZ
-                param.requires_grad = False
-                if "layer2" in name or "layer3" in name or "layer4" in name:
-                    param.requires_grad = True
-                model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
+            for name, param in model.named_parameters():
+                param.requires_grad = True
+                # if "layer3" in name or "layer4" in name:
+                #     param.requires_grad = True
+            model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
 
         model.to(self.device)
-        optimizer, lr_scheduler = self._get_optimizer()
+        optimizer, lr_scheduler = self._get_optimizer(t)
         best_loss, best_epoch, best_model = 1e8, 0, None
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             model.train()
             for images, targets in trn_loader:
+                targets -= self.model.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
@@ -120,13 +121,13 @@ class Appr(Inc_Learning_Appr):
                 optimizer.step()
                 lr_scheduler.step_iter()
                 train_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
-
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step_epoch()
 
             model.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
+                    targets -= self.model.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device), targets.to(self.device)
                     out = model(images)
@@ -151,7 +152,7 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
 
-        print(f"Best epoch: {epoch}")
+        print(f"Best epoch: {best_epoch}")
         best_model.fc = nn.Identity()
         self.model.bbs[t] = best_model
         torch.save(self.model.state_dict(), "best.pth")
@@ -162,10 +163,10 @@ class Appr(Inc_Learning_Appr):
         with torch.no_grad():
             classes = self.model.taskcla[t][1]
             self.model.task_offset.append(self.model.task_offset[-1] + classes)
-            transforms = Compose([t for t in val_loader.dataset.transform.transforms
-                                  if "CenterCrop" in t.__class__.__name__
-                                  or "ToTensor" in t.__class__.__name__
-                                  or "Normalize" in t.__class__.__name__])
+            transforms = Compose([tr for tr in val_loader.dataset.transform.transforms
+                                  if "CenterCrop" in tr.__class__.__name__
+                                  or "ToTensor" in tr.__class__.__name__
+                                  or "Normalize" in tr.__class__.__name__])
             for task_num, model in enumerate(self.model.bbs):
                 for c in range(classes):
                     c = c + self.model.task_offset[t]
@@ -226,12 +227,15 @@ class Appr(Inc_Learning_Appr):
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
 
-        # Task-Aware Multi-Head
-        # for m in range(len(pred)):
-        #     this_task = t
-        #     pred[m] = outputs[this_task][m].argmax() + self.model.task_offset[this_task]
-        hits_taw = (targets == targets).float()
+        # Task-Aware
+        classes = self.model.task_offset[t+1] - self.model.task_offset[t]
+        log_probs = torch.zeros((features.shape[0], classes), device=features.device)
+        for c, class_gmm in enumerate(self.task_distributions[t][:classes]):
+            log_probs[:, c] = class_gmm.score_samples(features[:, t])
+        class_id = torch.argmax(log_probs, dim=1) + self.model.task_offset[t]
+        hits_taw = (class_id == targets).float()
 
+        # Task-Agnostic
         pred = self.predict_class(features)
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
@@ -245,16 +249,17 @@ class Appr(Inc_Learning_Appr):
             mask = torch.full_like(confidences, fill_value=False)
             for t, _ in enumerate(self.task_distributions):
                 for c, class_gmm in enumerate(self.task_distributions[t]):
-                    confidences[:, t, c] = class_gmm.score_samples(features)
+                    c += self.model.task_offset[t]
+                    confidences[:, t, c] = class_gmm.score_samples(features[:, t])
                     mask[:, t, c] = True
 
             log_probs = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
             class_id = torch.argmax(log_probs, dim=1)
         return class_id
 
-    def _get_optimizer(self):
+    def _get_optimizer(self, t):
         """Returns the optimizer"""
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer = torch.optim.AdamW(self.model.bbs[t].parameters(), lr=self.lr, weight_decay=self.wd)
         scheduler = WarmUpScheduler(optimizer, 100, 0.96)
         return optimizer, scheduler
 
