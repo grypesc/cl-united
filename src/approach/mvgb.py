@@ -282,6 +282,7 @@ class Appr(Inc_Learning_Appr):
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
+        eps = 1e-8
         self.model.eval()
         with torch.no_grad():
             classes = self.model.taskcla[t][1]
@@ -321,8 +322,17 @@ class Appr(Inc_Learning_Appr):
 
                 # Calculate distributions
                 cov_type = "full" if self.use_multivariate else "diag"
-                gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=1e-8).to(self.device)
-                gmm.fit(class_features, delta=1e-3, n_iter=100)
+                is_ok = False
+                while not is_ok:
+                    try:
+                        gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=eps).to(self.device)
+                        gmm.fit(class_features, delta=1e-3, n_iter=100)
+                    except RuntimeError:
+                        eps = 10 * eps
+                        print(f"WARNING: Covariance matrix is singular. Compensation initialized. Changing eps to: {eps:.8f}")
+                    else:
+                        is_ok = True
+
                 self.task_distributions.append(gmm)
 
     def eval(self, t, val_loader):

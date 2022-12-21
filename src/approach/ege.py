@@ -154,12 +154,14 @@ class Appr(Inc_Learning_Appr):
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
+        eps = 1e-8
         self.model.eval()
         with torch.no_grad():
             classes = self.model.taskcla[t][1]
             self.model.task_offset.append(self.model.task_offset[-1] + classes)
             transforms = Compose([tr for tr in val_loader.dataset.transform.transforms
-                                  if "CenterCrop" in tr.__class__.__name__
+                                  if "Resize" in tr.__class__.__name__
+                                  or "CenterCrop" in tr.__class__.__name__
                                   or "ToTensor" in tr.__class__.__name__
                                   or "Normalize" in tr.__class__.__name__])
             for task_num in range(t+1):
@@ -195,8 +197,17 @@ class Appr(Inc_Learning_Appr):
 
                     # Calculate distributions
                     cov_type = "full" if self.use_multivariate else "diag"
-                    gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=1e-8).to(self.device)
-                    gmm.fit(class_features, delta=1e-3, n_iter=100)
+                    is_ok = False
+                    while not is_ok:
+                        try:
+                            gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=eps).to(self.device)
+                            gmm.fit(class_features, delta=1e-3, n_iter=100)
+                        except RuntimeError:
+                            eps = 10 * eps
+                            print(f"WARNING: Covariance matrix is singular. Increasing eps to: {eps:.7f} but this may hurt results")
+                        else:
+                            is_ok = True
+
                     self.task_distributions[task_num].append(gmm)
 
     def eval(self, t, val_loader):
