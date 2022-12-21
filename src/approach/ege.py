@@ -83,11 +83,6 @@ class Appr(Inc_Learning_Appr):
         self.task_distributions.append([])
         self.create_distributions(t, trn_loader, val_loader)
 
-        # Dump distributions
-        if self.save_distributions:
-            with open(f"distributions.pickle", 'wb') as f:
-                pickle.dump({"distributions": self.task_distributions}, f)
-
     def train_backbone(self, t, trn_loader, val_loader):
         if t == 0:
             model = self.model.bbs[0]
@@ -167,7 +162,8 @@ class Appr(Inc_Learning_Appr):
                                   if "CenterCrop" in tr.__class__.__name__
                                   or "ToTensor" in tr.__class__.__name__
                                   or "Normalize" in tr.__class__.__name__])
-            for task_num, model in enumerate(self.model.bbs):
+            for task_num in range(t+1):
+                model = self.model.bbs[task_num]
                 for c in range(classes):
                     c = c + self.model.task_offset[t]
                     train_indices = torch.tensor(trn_loader.dataset.labels) == c
@@ -236,16 +232,13 @@ class Appr(Inc_Learning_Appr):
         hits_taw = (class_id == targets).float()
 
         # Task-Agnostic
-        pred = self.predict_class(features)
+        pred = self.predict_class_bayes(features)
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
 
-    def predict_class(self, features):
-        return self.predict_class_bayes(features)
-
     def predict_class_bayes(self, features):
         with torch.no_grad():
-            confidences = torch.zeros((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), device=features.device)
+            confidences = torch.full((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), fill_value=-1e8, device=features.device)
             mask = torch.full_like(confidences, fill_value=False)
             for t, _ in enumerate(self.task_distributions):
                 for c, class_gmm in enumerate(self.task_distributions[t]):
@@ -253,6 +246,7 @@ class Appr(Inc_Learning_Appr):
                     confidences[:, t, c] = class_gmm.score_samples(features[:, t])
                     mask[:, t, c] = True
 
+            confidences = torch.nn.functional.gumbel_softmax(confidences, dim=2, tau=3)
             log_probs = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
             class_id = torch.argmax(log_probs, dim=1)
         return class_id

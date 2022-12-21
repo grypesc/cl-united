@@ -1,3 +1,5 @@
+import copy
+
 import torch
 from torch import nn
 from copy import deepcopy
@@ -175,6 +177,13 @@ class ExtractorEnsemble(LLL_Net):
 
         self.bbs = nn.ModuleList([bb])
         self.head = nn.Identity()
+
+        # Uncomment to load a model, then comment in training loop backbone training
+        # self.bbs = nn.ModuleList([copy.deepcopy(bb) for _ in range(5)])
+        # for bb in self.bbs:
+        #     bb.fc = nn.Identity()
+        # state_dict = torch.load("ege5x20.pth")
+        # self.load_state_dict(state_dict, strict=True)
 
         self.task_offset = [0]
         self.taskcla = taskcla
