@@ -161,14 +161,11 @@ class ExtractorEnsemble(LLL_Net):
         self.num_features = 64
         self.network_type = network_type
         if network_type == "resnet18":
-            bb = resnet18(num_classes=taskcla[0][1])
-            self.num_features = 128
+            bb = resnet18(num_classes=taskcla[0][1], num_features=self.num_features)
         elif network_type == "resnet34":
-            bb = resnet34(num_classes=taskcla[0][1])
-            self.num_features = 128
+            bb = resnet34(num_classes=taskcla[0][1], num_features=self.num_features)
         elif network_type == "resnet50":
-            bb = resnet50(num_classes=taskcla[0][1])
-            self.num_features = 128
+            bb = resnet50(num_classes=taskcla[0][1], num_features=self.num_features)
         elif network_type == "resnet32":
             bb = resnet32(num_classes=taskcla[0][1])
         else:
@@ -179,10 +176,10 @@ class ExtractorEnsemble(LLL_Net):
         self.head = nn.Identity()
 
         # Uncomment to load a model, then comment in training loop backbone training
-        # self.bbs = nn.ModuleList([copy.deepcopy(bb) for _ in range(5)])
+        # self.bbs = nn.ModuleList([copy.deepcopy(bb) for _ in range(len(taskcla))])
         # for bb in self.bbs:
         #     bb.fc = nn.Identity()
-        # state_dict = torch.load("ege5x20.pth")
+        # state_dict = torch.load("ege50resnet18.pth")
         # self.load_state_dict(state_dict, strict=True)
 
         self.task_offset = [0]
