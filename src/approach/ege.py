@@ -20,10 +20,11 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, gmms=1, use_multivariate=True, use_head=False, remove_outliers=False, load_distributions=False, save_distributions=False):
+                 logger=None, max_experts=5, gmms=1, use_multivariate=True, use_head=False, remove_outliers=False, load_distributions=False, save_distributions=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
+        self.max_experts = max_experts
         self.gmms = gmms
         self.patience = patience
         self.use_multivariate = use_multivariate
@@ -34,15 +35,14 @@ class Appr(Inc_Learning_Appr):
         self.model.to(device)
         self.task_distributions = []
 
-        if load_distributions:
-            with open(f"distributions.pickle", 'rb') as f:
-                data_file = pickle.load(f)
-                self.task_distributions = data_file["distributions"]
-
     @staticmethod
     def extra_parser(args):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
+        parser.add_argument('--max-experts',
+                            help='Maximum number of experts',
+                            type=int,
+                            default=5)
         parser.add_argument('--gmms',
                             help='Number of gaussian models in the mixture',
                             type=int,
@@ -75,8 +75,12 @@ class Appr(Inc_Learning_Appr):
 
     def train_loop(self, t, trn_loader, val_loader):
         # Train backbone
-        print(f"Training backbone on task {t}:")
-        self.train_backbone(t, trn_loader, val_loader)
+        if t < self.max_experts:
+            print(f"Training backbone on task {t}:")
+            self.train_backbone(t, trn_loader, val_loader)
+        else:
+            print(f"Finetuning backbone on task {t}:")
+            self.finetune_backbone(t, trn_loader, val_loader)
 
         # Create distributions
         print(f"Creating distributions for task {t}:")
@@ -92,10 +96,12 @@ class Appr(Inc_Learning_Appr):
             self.model.bbs.append(copy.deepcopy(self.model.bbs[-1]))
             model = self.model.bbs[t]
             for name, param in model.named_parameters():
-                param.requires_grad = True
-                # if "layer3" in name or "layer4" in name:
-                #     param.requires_grad = True
+                param.requires_grad = False
+                if "layer2" in name or "layer3" in name or "layer4" in name:
+                    param.requires_grad = True
             model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
+        print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+        print(f'The model has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
 
         model.to(self.device)
         optimizer, lr_scheduler = self._get_optimizer(t)
@@ -141,16 +147,19 @@ class Appr(Inc_Learning_Appr):
                 best_epoch = epoch
                 best_model = copy.deepcopy(model)
 
-            if epoch - best_epoch >= self.patience:
-                break
-
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
+
+            if epoch - best_epoch >= self.patience:
+                break
 
         print(f"Best epoch: {best_epoch}")
         best_model.fc = nn.Identity()
         self.model.bbs[t] = best_model
         torch.save(self.model.state_dict(), "best.pth")
+
+    def finetune_backbone(self, t, trn_loader, val_loader):
+        raise NotImplementedError
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
@@ -249,8 +258,8 @@ class Appr(Inc_Learning_Appr):
 
     def predict_class_bayes(self, features):
         with torch.no_grad():
-            confidences = torch.full((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), fill_value=-1e8, device=features.device)
-            mask = torch.full_like(confidences, fill_value=False)
+            confidences = torch.full((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), fill_value=-1e12, device=features.device)
+            mask = torch.full_like(confidences, fill_value=False, dtype=torch.bool)
             for t, _ in enumerate(self.task_distributions):
                 for c, class_gmm in enumerate(self.task_distributions[t]):
                     c += self.model.task_offset[t]
