@@ -20,7 +20,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=5, gmms=1, use_multivariate=True, use_head=False, remove_outliers=False, load_distributions=False, save_distributions=False):
+                 logger=None, max_experts=999, gmms=1, use_multivariate=True, use_head=False, remove_outliers=False, load_distributions=False, save_distributions=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -42,7 +42,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--max-experts',
                             help='Maximum number of experts',
                             type=int,
-                            default=5)
+                            default=999)
         parser.add_argument('--gmms',
                             help='Number of gaussian models in the mixture',
                             type=int,
@@ -100,8 +100,8 @@ class Appr(Inc_Learning_Appr):
                 if "layer2" in name or "layer3" in name or "layer4" in name:
                     param.requires_grad = True
             model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
-        print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-        print(f'The model has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
 
         model.to(self.device)
         optimizer, lr_scheduler = self._get_optimizer(t)
@@ -258,17 +258,17 @@ class Appr(Inc_Learning_Appr):
 
     def predict_class_bayes(self, features):
         with torch.no_grad():
-            confidences = torch.full((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), fill_value=-1e12, device=features.device)
-            mask = torch.full_like(confidences, fill_value=False, dtype=torch.bool)
+            log_probs = torch.full((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), fill_value=-1e12, device=features.device)
+            mask = torch.full_like(log_probs, fill_value=False, dtype=torch.bool)
             for t, _ in enumerate(self.task_distributions):
                 for c, class_gmm in enumerate(self.task_distributions[t]):
                     c += self.model.task_offset[t]
-                    confidences[:, t, c] = class_gmm.score_samples(features[:, t])
+                    log_probs[:, t, c] = class_gmm.score_samples(features[:, t])
                     mask[:, t, c] = True
 
-            confidences = torch.nn.functional.gumbel_softmax(confidences, dim=2, tau=3)
-            log_probs = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
-            class_id = torch.argmax(log_probs, dim=1)
+            confidences = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
+            confidences = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
+            class_id = torch.argmax(confidences, dim=1)
         return class_id
 
     def _get_optimizer(self, t):
