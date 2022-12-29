@@ -52,10 +52,6 @@ class Appr(Inc_Learning_Appr):
                             help='Use multivariate distribution',
                             action='store_true',
                             default=False)
-        parser.add_argument('--use-head',
-                            help='Use trainable head instead of Bayesian inference',
-                            action='store_true',
-                            default=False)
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
@@ -228,82 +224,82 @@ class Appr(Inc_Learning_Appr):
         self.model.bbs[bb_to_finetune] = best_model
         torch.save(self.model.state_dict(), "best_ft.pth")
 
+    @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
         eps = 1e-8
         self.model.eval()
-        with torch.no_grad():
-            classes = self.model.taskcla[t][1]
-            self.model.task_offset.append(self.model.task_offset[-1] + classes)
-            transforms = Compose([tr for tr in val_loader.dataset.transform.transforms
-                                  if "Resize" in tr.__class__.__name__
-                                  or "CenterCrop" in tr.__class__.__name__
-                                  or "ToTensor" in tr.__class__.__name__
-                                  or "Normalize" in tr.__class__.__name__])
-            for bb_num in range(min(self.max_experts, t+1)):
-                model = self.model.bbs[bb_num]
-                for c in range(classes):
-                    c = c + self.model.task_offset[t]
-                    train_indices = torch.tensor(trn_loader.dataset.labels) == c
-                    # Uncomment to add valid set to distributions
-                    # val_indices = torch.tensor(val_loader.dataset.labels) == c
-                    if isinstance(trn_loader.dataset.images, list):
-                        train_images = list(compress(trn_loader.dataset.images, train_indices))
-                        ds = ClassDirectoryDataset(train_images, transforms)
-                        # val_images = list(compress(val_loader.dataset.images, val_indices))
-                        # ds = ClassDirectoryDataset(train_images + val_images, transforms)
+        classes = self.model.taskcla[t][1]
+        self.model.task_offset.append(self.model.task_offset[-1] + classes)
+        transforms = Compose([tr for tr in val_loader.dataset.transform.transforms
+                              if "Resize" in tr.__class__.__name__
+                              or "CenterCrop" in tr.__class__.__name__
+                              or "ToTensor" in tr.__class__.__name__
+                              or "Normalize" in tr.__class__.__name__])
+        for bb_num in range(min(self.max_experts, t+1)):
+            model = self.model.bbs[bb_num]
+            for c in range(classes):
+                c = c + self.model.task_offset[t]
+                train_indices = torch.tensor(trn_loader.dataset.labels) == c
+                # Uncomment to add valid set to distributions
+                # val_indices = torch.tensor(val_loader.dataset.labels) == c
+                if isinstance(trn_loader.dataset.images, list):
+                    train_images = list(compress(trn_loader.dataset.images, train_indices))
+                    ds = ClassDirectoryDataset(train_images, transforms)
+                    # val_images = list(compress(val_loader.dataset.images, val_indices))
+                    # ds = ClassDirectoryDataset(train_images + val_images, transforms)
+                else:
+                    ds = trn_loader.dataset.images[train_indices]
+                    # ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
+                    ds = ClassMemoryDataset(ds, transforms)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
+                from_ = 0
+                class_features = torch.full((2 * len(ds), self.model.num_features), fill_value=-999999999.0, device=self.model.device)
+                for images in loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device)
+                    features = model(images)
+                    class_features[from_: from_+bsz] = features
+                    features = model(torch.flip(images, dims=(3,)))
+                    class_features[from_+bsz: from_+2*bsz] = features
+                    from_ += 2*bsz
+
+                if self.remove_outliers:
+                    median = torch.median(class_features, dim=0)[0]
+                    dist = torch.cdist(class_features, median.unsqueeze(0), p=2).squeeze(1)
+                    not_outliers = torch.topk(dist, int(0.99*class_features.shape[0]), largest=False, sorted=False)[1]
+                    class_features = class_features[not_outliers]
+
+                # Calculate distributions
+                cov_type = "full" if self.use_multivariate else "diag"
+                is_ok = False
+                while not is_ok:
+                    try:
+                        gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=eps).to(self.device)
+                        gmm.fit(class_features, delta=1e-3, n_iter=100)
+                    except RuntimeError:
+                        eps = 10 * eps
+                        print(f"WARNING: Covariance matrix is singular. Increasing eps to: {eps:.7f} but this may hurt results")
                     else:
-                        ds = trn_loader.dataset.images[train_indices]
-                        # ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
-                        ds = ClassMemoryDataset(ds, transforms)
-                    loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
-                    from_ = 0
-                    class_features = torch.full((2 * len(ds), self.model.num_features), fill_value=-999999999.0, device=self.model.device)
-                    for images in loader:
-                        bsz = images.shape[0]
-                        images = images.to(self.device)
-                        features = model(images)
-                        class_features[from_: from_+bsz] = features
-                        features = model(torch.flip(images, dims=(3,)))
-                        class_features[from_+bsz: from_+2*bsz] = features
-                        from_ += 2*bsz
+                        is_ok = True
 
-                    if self.remove_outliers:
-                        median = torch.median(class_features, dim=0)[0]
-                        dist = torch.cdist(class_features, median.unsqueeze(0), p=2).squeeze(1)
-                        not_outliers = torch.topk(dist, int(0.99*class_features.shape[0]), largest=False, sorted=False)[1]
-                        class_features = class_features[not_outliers]
+                self.experts_distributions[bb_num].append(gmm)
 
-                    # Calculate distributions
-                    cov_type = "full" if self.use_multivariate else "diag"
-                    is_ok = False
-                    while not is_ok:
-                        try:
-                            gmm = GaussianMixture(self.gmms, class_features.shape[1], covariance_type=cov_type, eps=eps).to(self.device)
-                            gmm.fit(class_features, delta=1e-3, n_iter=100)
-                        except RuntimeError:
-                            eps = 10 * eps
-                            print(f"WARNING: Covariance matrix is singular. Increasing eps to: {eps:.7f} but this may hurt results")
-                        else:
-                            is_ok = True
-
-                    self.experts_distributions[bb_num].append(gmm)
-
+    @torch.no_grad()
     def eval(self, t, val_loader):
         """Contains the evaluation code"""
-        with torch.no_grad():
-            total_loss, total_acc_taw, total_acc_tag, total_num = 0, 0, 0, 0
-            self.model.eval()
-            for images, targets in val_loader:
-                targets = targets.to(self.device)
-                # Forward current model
-                features = self.model(images.to(self.device))
-                hits_taw, hits_tag = self.calculate_metrics(features, targets, t)
-                # Log
-                total_loss = 0
-                total_acc_taw += hits_taw.sum().item()
-                total_acc_tag += hits_tag.sum().item()
-                total_num += len(targets)
+        total_loss, total_acc_taw, total_acc_tag, total_num = 0, 0, 0, 0
+        self.model.eval()
+        for images, targets in val_loader:
+            targets = targets.to(self.device)
+            # Forward current model
+            features = self.model(images.to(self.device))
+            hits_taw, hits_tag = self.calculate_metrics(features, targets, t)
+            # Log
+            total_loss = 0
+            total_acc_taw += hits_taw.sum().item()
+            total_acc_tag += hits_tag.sum().item()
+            total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
     def criterion(self, t, outputs, targets, features=None, old_features=None):
