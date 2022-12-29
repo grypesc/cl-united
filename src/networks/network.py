@@ -175,11 +175,11 @@ class ExtractorEnsemble(LLL_Net):
         self.bbs = nn.ModuleList([bb])
         self.head = nn.Identity()
 
-        # Uncomment to load a model, then comment in training loop backbone training
-        # self.bbs = nn.ModuleList([copy.deepcopy(bb) for _ in range(len(taskcla))])
+        # Uncomment to load a model, set 6 to number of experts that's in .pth, comment backbone training
+        # self.bbs = nn.ModuleList([copy.deepcopy(bb) for _ in range(min(len(taskcla), 6))])
         # for bb in self.bbs:
         #     bb.fc = nn.Identity()
-        # state_dict = torch.load("ege50resnet18.pth")
+        # state_dict = torch.load("seb-resnet32.pth")
         # self.load_state_dict(state_dict, strict=True)
 
         self.task_offset = [0]

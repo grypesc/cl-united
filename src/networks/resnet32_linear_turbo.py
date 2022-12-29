@@ -118,14 +118,16 @@ class ResNet(nn.Module):
             layers.append(block(self.inplanes, planes))
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = torch.mean(x, dim=(2, 3))
+        features = torch.mean(x, dim=(2, 3))
         # x = nn.functional.normalize(x, p=2.0, dim=1, eps=1e-12)
-        x = self.fc(x)
+        x = self.fc(features)
+        if return_features:
+            return x, features
         return x
 
     # def calculate_semi_features(self, x):

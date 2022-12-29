@@ -314,7 +314,7 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def _forward_impl(self, x: Tensor) -> Tensor:
+    def _forward_impl(self, x, return_features=False):
         # See note [TorchScript super()]
         x = self.conv1(x)
         x = self.bn1(x)
@@ -327,9 +327,10 @@ class ResNet(nn.Module):
         x = self.layer4(x)
         x = self.bottleneck(x)
         x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-
+        features = torch.flatten(x, 1)
+        x = self.fc(features)
+        if return_features:
+            return x, features
         return x
 
     def forward(self, x: Tensor) -> Tensor:

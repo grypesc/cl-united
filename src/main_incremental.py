@@ -94,6 +94,8 @@ def main(argv=None):
                         help='Fix batch normalization after first task (default=%(default)s)')
     parser.add_argument('--eval-on-train', action='store_true',
                         help='Show train loss and accuracy (default=%(default)s)')
+    parser.add_argument('--use-test-as-val', action='store_true',
+                        help='Use test set as a validation set, common practice in other benchmarks')
     # gridsearch args
     parser.add_argument('--gridsearch-tasks', default=-1, type=int,
                         help='Number of tasks to apply GridSearch (-1: all tasks) (default=%(default)s)')
@@ -194,10 +196,13 @@ def main(argv=None):
     utils.seed_everything(seed=args.seed)
     trn_loader, val_loader, tst_loader, taskcla = get_loaders(args.datasets, args.num_tasks, args.nc_first_task,
                                                               args.batch_size, num_workers=args.num_workers,
-                                                              pin_memory=args.pin_memory)
+                                                              pin_memory=args.pin_memory,
+                                                              validation=0.0 if args.use_test_as_val else 0.1)
     # Apply arguments for loaders
     if args.use_valid_only:
         tst_loader = val_loader
+    if args.use_test_as_val:
+        val_loader = tst_loader
     max_task = len(taskcla) if args.stop_at_task == 0 else args.stop_at_task
 
     # Network and Approach instances

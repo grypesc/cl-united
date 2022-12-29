@@ -1,6 +1,4 @@
 import copy
-import pickle
-import random
 import numpy as np
 import torch
 
@@ -20,20 +18,19 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, use_multivariate=True, use_head=False, remove_outliers=False, load_distributions=False, save_distributions=False):
+                 logger=None, max_experts=999, gmms=1, alpha=0.5, use_multivariate=True, use_head=False, remove_outliers=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
         self.max_experts = max_experts
         self.gmms = gmms
+        self.alpha = alpha
         self.patience = patience
         self.use_multivariate = use_multivariate
         self.use_head = use_head
         self.remove_outliers = remove_outliers
-        self.load_distributions = load_distributions
-        self.save_distributions = save_distributions
         self.model.to(device)
-        self.task_distributions = []
+        self.experts_distributions = []
 
     @staticmethod
     def extra_parser(args):
@@ -50,7 +47,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--patience',
                             help='Early stopping',
                             type=int,
-                            default=5)
+                            default=10)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
@@ -59,16 +56,12 @@ class Appr(Inc_Learning_Appr):
                             help='Use trainable head instead of Bayesian inference',
                             action='store_true',
                             default=False)
+        parser.add_argument('--alpha',
+                            help='relative weight of kd loss',
+                            type=float,
+                            default=1.0)
         parser.add_argument('--remove-outliers',
                             help='Remove class outliers before creating distribution',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--load-distributions',
-                            help='Load distributions from a pickle file',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--save-distributions',
-                            help='Save distributions to a pickle file',
                             action='store_true',
                             default=False)
         return parser.parse_known_args(args)
@@ -78,13 +71,13 @@ class Appr(Inc_Learning_Appr):
         if t < self.max_experts:
             print(f"Training backbone on task {t}:")
             self.train_backbone(t, trn_loader, val_loader)
+            self.experts_distributions.append([])
         else:
             print(f"Finetuning backbone on task {t}:")
             self.finetune_backbone(t, trn_loader, val_loader)
 
         # Create distributions
         print(f"Creating distributions for task {t}:")
-        self.task_distributions.append([])
         self.create_distributions(t, trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader):
@@ -104,7 +97,7 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
 
         model.to(self.device)
-        optimizer, lr_scheduler = self._get_optimizer(t)
+        optimizer, lr_scheduler = self._get_optimizer(t, self.wd)
         best_loss, best_epoch, best_model = 1e8, 0, None
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
@@ -159,7 +152,81 @@ class Appr(Inc_Learning_Appr):
         torch.save(self.model.state_dict(), "best.pth")
 
     def finetune_backbone(self, t, trn_loader, val_loader):
-        raise NotImplementedError
+        """ This time use knowledge distillation to not let old distributions to drift too much """
+        bb_to_finetune = t % self.max_experts
+        old_model = copy.deepcopy(self.model.bbs[bb_to_finetune])
+        for name, param in old_model.named_parameters():
+            param.requires_grad = False
+        old_model.eval()
+
+        model = self.model.bbs[bb_to_finetune]
+        for name, param in model.named_parameters():
+            param.requires_grad = False
+            if "layer2" in name or "layer3" in name or "layer4" in name:
+                param.requires_grad = True
+        model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
+        model.to(self.device)
+
+        optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, 0)
+        best_loss, best_epoch, best_model = 1e8, 0, None
+        for epoch in range(self.nepochs):
+            train_loss, valid_loss = [], []
+            train_hits, val_hits = 0, 0
+            model.train()
+            for m in model.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+            for images, targets in trn_loader:
+                targets -= self.model.task_offset[t]
+                bsz = images.shape[0]
+                images, targets = images.to(self.device), targets.to(self.device)
+                optimizer.zero_grad()
+                with torch.no_grad():
+                    old_features = old_model(images)  # resnet with fc as identity returns features by default
+                out, features = model(images, return_features=True)
+                loss = self.criterion(t, out, targets, features, old_features)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
+                optimizer.step()
+                lr_scheduler.step_iter()
+                train_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
+                train_loss.append(float(bsz * loss))
+            lr_scheduler.step_epoch()
+
+            model.eval()
+            with torch.no_grad():
+                for images, targets in val_loader:
+                    targets -= self.model.task_offset[t]
+                    bsz = images.shape[0]
+                    images, targets = images.to(self.device), targets.to(self.device)
+                    with torch.no_grad():
+                        old_features = old_model(images)  # resnet with fc as identity returns features by default
+                    out, features = model(images, return_features=True)
+                    loss = self.criterion(t, out, targets, features, old_features)
+
+                    val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
+                    valid_loss.append(float(bsz * loss))
+
+            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            valid_loss = sum(valid_loss) / len(val_loader.dataset)
+            train_acc = train_hits / len(trn_loader.dataset)
+            val_acc = val_hits / len(val_loader.dataset)
+
+            if valid_loss < best_loss:
+                best_loss = valid_loss
+                best_epoch = epoch
+                best_model = copy.deepcopy(model)
+
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
+                  f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
+
+            if epoch - best_epoch >= self.patience:
+                break
+
+        print(f"Best epoch: {best_epoch}")
+        best_model.fc = nn.Identity()
+        self.model.bbs[bb_to_finetune] = best_model
+        torch.save(self.model.state_dict(), "best_ft.pth")
 
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
@@ -173,18 +240,21 @@ class Appr(Inc_Learning_Appr):
                                   or "CenterCrop" in tr.__class__.__name__
                                   or "ToTensor" in tr.__class__.__name__
                                   or "Normalize" in tr.__class__.__name__])
-            for task_num in range(t+1):
-                model = self.model.bbs[task_num]
+            for bb_num in range(min(self.max_experts, t+1)):
+                model = self.model.bbs[bb_num]
                 for c in range(classes):
                     c = c + self.model.task_offset[t]
                     train_indices = torch.tensor(trn_loader.dataset.labels) == c
-                    val_indices = torch.tensor(val_loader.dataset.labels) == c
+                    # Uncomment to add valid set to distributions
+                    # val_indices = torch.tensor(val_loader.dataset.labels) == c
                     if isinstance(trn_loader.dataset.images, list):
                         train_images = list(compress(trn_loader.dataset.images, train_indices))
-                        val_images = list(compress(val_loader.dataset.images, val_indices))
-                        ds = ClassDirectoryDataset(train_images + val_images, transforms)
+                        ds = ClassDirectoryDataset(train_images, transforms)
+                        # val_images = list(compress(val_loader.dataset.images, val_indices))
+                        # ds = ClassDirectoryDataset(train_images + val_images, transforms)
                     else:
-                        ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
+                        ds = trn_loader.dataset.images[train_indices]
+                        # ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
                         ds = ClassMemoryDataset(ds, transforms)
                     loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
                     from_ = 0
@@ -217,7 +287,7 @@ class Appr(Inc_Learning_Appr):
                         else:
                             is_ok = True
 
-                    self.task_distributions[task_num].append(gmm)
+                    self.experts_distributions[bb_num].append(gmm)
 
     def eval(self, t, val_loader):
         """Contains the evaluation code"""
@@ -236,18 +306,25 @@ class Appr(Inc_Learning_Appr):
                 total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
-    def criterion(self, t, outputs, targets):
+    def criterion(self, t, outputs, targets, features=None, old_features=None):
         """Returns the loss value"""
-        return nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
+        ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
+        if old_features is not None:  # Knowledge distillation loss on features
+            kd_loss = nn.functional.mse_loss(features, old_features)
+            total_loss = (1 - self.alpha) * ce_loss + self.alpha * kd_loss
+            return total_loss
+        return ce_loss
 
+    @torch.no_grad()
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
-
         # Task-Aware
         classes = self.model.task_offset[t+1] - self.model.task_offset[t]
         log_probs = torch.zeros((features.shape[0], classes), device=features.device)
-        for c, class_gmm in enumerate(self.task_distributions[t][:classes]):
-            log_probs[:, c] = class_gmm.score_samples(features[:, t])
+        bb_num = t % self.max_experts
+        from_ = 0 if t < self.max_experts else self.model.task_offset[t] - self.model.task_offset[bb_num]
+        for c, class_gmm in enumerate(self.experts_distributions[bb_num][from_:from_ + classes]):
+            log_probs[:, c] = class_gmm.score_samples(features[:, bb_num])
         class_id = torch.argmax(log_probs, dim=1) + self.model.task_offset[t]
         hits_taw = (class_id == targets).float()
 
@@ -256,24 +333,24 @@ class Appr(Inc_Learning_Appr):
         hits_tag = (pred == targets).float()
         return hits_taw, hits_tag
 
+    @torch.no_grad()
     def predict_class_bayes(self, features):
-        with torch.no_grad():
-            log_probs = torch.full((features.shape[0], len(self.task_distributions), len(self.task_distributions[0])), fill_value=-1e12, device=features.device)
-            mask = torch.full_like(log_probs, fill_value=False, dtype=torch.bool)
-            for t, _ in enumerate(self.task_distributions):
-                for c, class_gmm in enumerate(self.task_distributions[t]):
-                    c += self.model.task_offset[t]
-                    log_probs[:, t, c] = class_gmm.score_samples(features[:, t])
-                    mask[:, t, c] = True
+        log_probs = torch.full((features.shape[0], len(self.experts_distributions), len(self.experts_distributions[0])), fill_value=-1e12, device=features.device)
+        mask = torch.full_like(log_probs, fill_value=False, dtype=torch.bool)
+        for bb_num, _ in enumerate(self.experts_distributions):
+            for c, class_gmm in enumerate(self.experts_distributions[bb_num]):
+                c += self.model.task_offset[bb_num]
+                log_probs[:, bb_num, c] = class_gmm.score_samples(features[:, bb_num])
+                mask[:, bb_num, c] = True
 
-            confidences = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
-            confidences = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
-            class_id = torch.argmax(confidences, dim=1)
+        confidences = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
+        confidences = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
+        class_id = torch.argmax(confidences, dim=1)
         return class_id
 
-    def _get_optimizer(self, t):
+    def _get_optimizer(self, num, wd):
         """Returns the optimizer"""
-        optimizer = torch.optim.AdamW(self.model.bbs[t].parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer = torch.optim.AdamW(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=wd)
         scheduler = WarmUpScheduler(optimizer, 100, 0.96)
         return optimizer, scheduler
 
