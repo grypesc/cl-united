@@ -8,7 +8,7 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose
 
-from .mvgb import WarmUpScheduler, ClassMemoryDataset, ClassDirectoryDataset
+from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .gmm import GaussianMixture
 from .incremental_learning import Inc_Learning_Appr
 
@@ -18,8 +18,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=0.5, use_multivariate=True, use_head=False, remove_outliers=False,
-                 use_fixed_decay=False):
+                 logger=None, max_experts=999, gmms=1, alpha=0.5, use_multivariate=True, use_head=False, remove_outliers=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -32,7 +31,6 @@ class Appr(Inc_Learning_Appr):
         self.remove_outliers = remove_outliers
         self.model.to(device)
         self.experts_distributions = []
-        self.use_fixed_decay = use_fixed_decay
 
     @staticmethod
     def extra_parser(args):
@@ -46,10 +44,6 @@ class Appr(Inc_Learning_Appr):
                             help='Number of gaussian models in the mixture',
                             type=int,
                             default=1)
-        parser.add_argument('--patience',
-                            help='Early stopping',
-                            type=int,
-                            default=10)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
@@ -59,10 +53,6 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=1.0)
         parser.add_argument('--remove-outliers',
-                            help='Remove class outliers before creating distribution',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--use-fixed-decay',
                             help='Remove class outliers before creating distribution',
                             action='store_true',
                             default=False)
@@ -91,16 +81,15 @@ class Appr(Inc_Learning_Appr):
             self.model.bbs.append(copy.deepcopy(self.model.bbs[-1]))
             model = self.model.bbs[t]
             for name, param in model.named_parameters():
-                param.requires_grad = False
-                if "layer2" in name or "layer3" in name or "layer4" in name:
-                    param.requires_grad = True
+                param.requires_grad = True
+                # if "layer2" in name or "layer3" in name or "layer4" in name:
+                #     param.requires_grad = True
             model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
 
         model.to(self.device)
         optimizer, lr_scheduler = self._get_optimizer(t, self.wd)
-        best_loss, best_epoch, best_model = 1e8, 0, None
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
@@ -115,14 +104,9 @@ class Appr(Inc_Learning_Appr):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
                 optimizer.step()
-                if not self.use_fixed_decay:
-                    lr_scheduler.step_iter()
                 train_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
-            if self.use_fixed_decay:
-                lr_scheduler.step()
-            else:
-                lr_scheduler.step_epoch()
+            lr_scheduler.step()
 
             model.eval()
             with torch.no_grad():
@@ -141,23 +125,11 @@ class Appr(Inc_Learning_Appr):
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            if valid_loss < best_loss and not self.use_fixed_decay:
-                best_loss = valid_loss
-                best_epoch = epoch
-                best_model = copy.deepcopy(model)
-
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
 
-            if epoch - best_epoch >= self.patience:
-                break
-        if self.use_fixed_decay:
-            best_model = copy.deepcopy(model)
-            best_epoch = self.nepochs - 1
-
-        print(f"Best epoch: {best_epoch}")
-        best_model.fc = nn.Identity()
-        self.model.bbs[t] = best_model
+        model.fc = nn.Identity()
+        self.model.bbs[t] = model
         torch.save(self.model.state_dict(), "best.pth")
 
     def finetune_backbone(self, t, trn_loader, val_loader):
@@ -177,7 +149,6 @@ class Appr(Inc_Learning_Appr):
         model.to(self.device)
 
         optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, 0)
-        best_loss, best_epoch, best_model = 1e8, 0, None
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
@@ -197,14 +168,10 @@ class Appr(Inc_Learning_Appr):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
                 optimizer.step()
-                if not self.use_fixed_decay:
-                    lr_scheduler.step_iter()
                 train_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
-            if self.use_fixed_decay:
-                lr_scheduler.step()
-            else:
-                lr_scheduler.step_epoch()
+
+            lr_scheduler.step()
 
             model.eval()
             with torch.no_grad():
@@ -225,23 +192,11 @@ class Appr(Inc_Learning_Appr):
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            if valid_loss < best_loss and not self.use_fixed_decay:
-                best_loss = valid_loss
-                best_epoch = epoch
-                best_model = copy.deepcopy(model)
-
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
 
-            if epoch - best_epoch >= self.patience:
-                break
-        if self.use_fixed_decay:
-            best_model = copy.deepcopy(model)
-            best_epoch = self.nepochs - 1
- 
-        print(f"Best epoch: {best_epoch}")
-        best_model.fc = nn.Identity()
-        self.model.bbs[bb_to_finetune] = best_model
+        model.fc = nn.Identity()
+        self.model.bbs[bb_to_finetune] = model
         torch.save(self.model.state_dict(), "best_ft.pth")
 
     @torch.no_grad()
@@ -359,17 +314,14 @@ class Appr(Inc_Learning_Appr):
                 log_probs[:, bb_num, c] = class_gmm.score_samples(features[:, bb_num])
                 mask[:, bb_num, c] = True
 
-        confidences = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
-        confidences = torch.sum(confidences, dim=1) / torch.sum(mask, dim=1)
+        if len(self.experts_distributions) > 1:
+            log_probs = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
+        confidences = torch.sum(log_probs, dim=1) / torch.sum(mask, dim=1)
         class_id = torch.argmax(confidences, dim=1)
         return class_id
 
     def _get_optimizer(self, num, wd):
         """Returns the optimizer"""
-        if self.use_fixed_decay:
-            optimizer = torch.optim.SGD(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=self.wd, momentum=self.momentum)
-            scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[60, 120, 160], gamma=0.1)
-        else:
-            optimizer = torch.optim.AdamW(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=wd)
-            scheduler = WarmUpScheduler(optimizer, 100, 0.96)
+        optimizer = torch.optim.SGD(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=wd, momentum=self.momentum)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[60, 120, 160], gamma=0.1)
         return optimizer, scheduler
