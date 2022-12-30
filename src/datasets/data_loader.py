@@ -181,6 +181,8 @@ def get_transforms(resize, pad, crop, flip, normalize, extend_channel):
     if flip:
         trn_transform_list.append(transforms.RandomHorizontalFlip())
 
+    trn_transform_list.append(transforms.ColorJitter(brightness=63 / 255))
+
     # to tensor
     trn_transform_list.append(transforms.ToTensor())
     tst_transform_list.append(transforms.ToTensor())
