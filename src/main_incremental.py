@@ -209,7 +209,7 @@ def main(argv=None):
     utils.seed_everything(seed=args.seed)
     if args.approach == "mvgb":
         net = Extractor(init_model, taskcla, args.network, device)
-    elif args.approach == "ege":
+    elif args.approach == "berg":
         net = ExtractorEnsemble(init_model, taskcla, args.network, device)
     else:
         net = LLL_Net(init_model, remove_existing_head=not args.keep_existing_head)

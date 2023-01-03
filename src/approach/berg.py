@@ -18,11 +18,12 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=0.5, use_multivariate=True, use_head=False, remove_outliers=False):
+                 logger=None, max_experts=999, gmms=1, alpha=0.5, use_multivariate=True, use_z_score=False, use_head=False, remove_outliers=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
         self.max_experts = max_experts
+        self.use_z_score = use_z_score
         self.gmms = gmms
         self.alpha = alpha
         self.patience = patience
@@ -46,6 +47,10 @@ class Appr(Inc_Learning_Appr):
                             default=1)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
+                            action='store_true',
+                            default=False)
+        parser.add_argument('--use-z-score',
+                            help='Replace gumbel softmax with z-score normalized softmax',
                             action='store_true',
                             default=False)
         parser.add_argument('--alpha',
@@ -314,8 +319,17 @@ class Appr(Inc_Learning_Appr):
                 log_probs[:, bb_num, c] = class_gmm.score_samples(features[:, bb_num])
                 mask[:, bb_num, c] = True
 
-        if len(self.experts_distributions) > 1:
-            log_probs = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
+        if self.use_z_score:
+            for i in range(len(self.experts_distributions)):
+                mean = torch.mean(log_probs[:, i][mask[:, i]].reshape(mask.shape[0], -1), dim=1)
+                std = torch.std(log_probs[:, i][mask[:, i]].reshape(mask.shape[0], -1), dim=1)
+                log_probs[:, i] = (log_probs[:, i] - mean.unsqueeze(1)) / std.unsqueeze(1)
+            log_probs[~mask] = -1e12
+            log_probs = torch.softmax(10*log_probs, dim=2)
+        else:
+            if len(self.experts_distributions) > 1:
+                log_probs = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
+
         confidences = torch.sum(log_probs, dim=1) / torch.sum(mask, dim=1)
         class_id = torch.argmax(confidences, dim=1)
         return class_id
