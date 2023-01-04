@@ -1,4 +1,6 @@
 import copy
+import random
+
 import numpy as np
 import torch
 
@@ -18,7 +20,8 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, use_z_score=False, use_head=False, remove_outliers=False):
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="robin",
+                 use_z_score=False, use_head=False, remove_outliers=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -29,6 +32,7 @@ class Appr(Inc_Learning_Appr):
         self.tau = tau
         self.patience = patience
         self.use_multivariate = use_multivariate
+        self.ft_selection_strategy = ft_selection_strategy
         self.use_head = use_head
         self.remove_outliers = remove_outliers
         self.model.to(device)
@@ -46,6 +50,11 @@ class Appr(Inc_Learning_Appr):
                             help='Number of gaussian models in the mixture',
                             type=int,
                             default=1)
+        parser.add_argument('--ft-selection-strategy',
+                            help='Expert selection strategy for fine-tuning',
+                            type=str,
+                            choices=["robin", "random", "bayes"],
+                            default="robin")
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
@@ -75,8 +84,9 @@ class Appr(Inc_Learning_Appr):
             self.train_backbone(t, trn_loader, val_loader)
             self.experts_distributions.append([])
         else:
-            print(f"Finetuning backbone on task {t}:")
-            self.finetune_backbone(t, trn_loader, val_loader)
+            bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader)
+            print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
+            self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
 
         # Create distributions
         print(f"Creating distributions for task {t}:")
@@ -142,9 +152,38 @@ class Appr(Inc_Learning_Appr):
         self.model.bbs[t] = model
         torch.save(self.model.state_dict(), "best.pth")
 
-    def finetune_backbone(self, t, trn_loader, val_loader):
+    @torch.no_grad()
+    def _choose_backbone_to_finetune(self, t, trn_loader):
+        if self.ft_selection_strategy == "robin":
+            return t % self.max_experts
+        if self.ft_selection_strategy == "random":
+            return random.randint(0, self.max_experts-1)
+        # Perform expert selection based on distributions overlapping
+        self.model.eval()
+        expert_scores = torch.zeros((self.max_experts, ), device=self.device)
+        for bb_num in range(self.max_experts):
+            distributions = self.experts_distributions[bb_num]
+            model = self.model.bbs[bb_num]
+            scores = []
+            for images, _ in trn_loader:
+                bsz = images.shape[0]
+                images = images.to(self.device)
+                features = model(images)
+                # features_flipped = model(torch.flip(images, dims=(3,)))
+                # features = torch.cat((features, features_flipped), dim=0)
+                log_likelihoods = torch.zeros((bsz, len(distributions)), device=self.device)
+                for c, class_gmm in enumerate(distributions):
+                    log_likelihoods[:, c] = class_gmm.score_samples(features)
+                max_hoods, _ = torch.max(log_likelihoods, dim=1)
+                scores.append(max_hoods)
+            scores = torch.cat(scores, dim=0)
+            expert_scores[bb_num] = torch.mean(scores)
+        bb_to_finetune = torch.argmin(expert_scores)
+        return int(bb_to_finetune)
+
+    def finetune_backbone(self, t, bb_to_finetune, trn_loader, val_loader):
         """ This time use knowledge distillation to not let old distributions to drift too much """
-        bb_to_finetune = t % self.max_experts
+
         old_model = copy.deepcopy(self.model.bbs[bb_to_finetune])
         for name, param in old_model.named_parameters():
             param.requires_grad = False
