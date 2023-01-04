@@ -18,7 +18,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=0.5, use_multivariate=True, use_z_score=False, use_head=False, remove_outliers=False):
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, use_z_score=False, use_head=False, remove_outliers=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -26,6 +26,7 @@ class Appr(Inc_Learning_Appr):
         self.use_z_score = use_z_score
         self.gmms = gmms
         self.alpha = alpha
+        self.tau = tau
         self.patience = patience
         self.use_multivariate = use_multivariate
         self.use_head = use_head
@@ -57,6 +58,10 @@ class Appr(Inc_Learning_Appr):
                             help='relative weight of kd loss',
                             type=float,
                             default=1.0)
+        parser.add_argument('--tau',
+                            help='gumbel softmax temperature',
+                            type=float,
+                            default=3.0)
         parser.add_argument('--remove-outliers',
                             help='Remove class outliers before creating distribution',
                             action='store_true',
@@ -328,7 +333,7 @@ class Appr(Inc_Learning_Appr):
             log_probs = torch.softmax(10*log_probs, dim=2)
         else:
             if len(self.experts_distributions) > 1:
-                log_probs = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=3)
+                log_probs = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=self.tau)
 
         confidences = torch.sum(log_probs, dim=1) / torch.sum(mask, dim=1)
         class_id = torch.argmax(confidences, dim=1)
