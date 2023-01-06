@@ -96,6 +96,8 @@ def main(argv=None):
                         help='Show train loss and accuracy (default=%(default)s)')
     parser.add_argument('--use-test-as-val', action='store_true',
                         help='Use test set as a validation set, common practice in other benchmarks')
+    parser.add_argument('--extra-aug', default='', type=str, choices=['', 'fetril'],
+                        help='Additional data augmentations (default=%(default)s)')
     # gridsearch args
     parser.add_argument('--gridsearch-tasks', default=-1, type=int,
                         help='Number of tasks to apply GridSearch (-1: all tasks) (default=%(default)s)')
@@ -197,7 +199,8 @@ def main(argv=None):
     trn_loader, val_loader, tst_loader, taskcla = get_loaders(args.datasets, args.num_tasks, args.nc_first_task,
                                                               args.batch_size, num_workers=args.num_workers,
                                                               pin_memory=args.pin_memory,
-                                                              validation=0.0 if args.use_test_as_val else 0.1)
+                                                              validation=0.0 if args.use_test_as_val else 0.1,
+                                                              extra_aug = args.extra_aug)
     # Apply arguments for loaders
     if args.use_valid_only:
         tst_loader = val_loader

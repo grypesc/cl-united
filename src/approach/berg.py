@@ -148,10 +148,9 @@ class Appr(Inc_Learning_Appr):
 
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
-
         model.fc = nn.Identity()
         self.model.bbs[t] = model
-        torch.save(self.model.state_dict(), "best.pth")
+        torch.save(self.model.state_dict(), "best_{}_{}.pth".format(self.model.network_type, len(self.model.taskcla)))
 
     @torch.no_grad()
     def _choose_backbone_to_finetune(self, t, trn_loader):
@@ -247,7 +246,7 @@ class Appr(Inc_Learning_Appr):
 
         model.fc = nn.Identity()
         self.model.bbs[bb_to_finetune] = model
-        torch.save(self.model.state_dict(), "best_ft.pth")
+        torch.save(self.model.state_dict(), "best_{}_{}_ft.pth".format(self.network_type, len(self.model.taskcla)))
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader):

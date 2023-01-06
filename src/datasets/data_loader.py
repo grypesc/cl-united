@@ -9,9 +9,12 @@ from torchvision.datasets import SVHN as TorchVisionSVHN
 from . import base_dataset as basedat
 from . import memory_dataset as memd
 from .dataset_config import dataset_config
+from .autoaugment import CIFAR10Policy
+from .ops import Cutout
 
 
-def get_loaders(datasets, num_tasks, nc_first_task, batch_size, num_workers, pin_memory, validation=.1):
+def get_loaders(datasets, num_tasks, nc_first_task, batch_size, num_workers, pin_memory, validation=.1,
+                extra_aug=""):
     """Apply transformations to Datasets and create the DataLoaders for each task"""
 
     trn_load, val_load, tst_load = [], [], []
@@ -27,7 +30,8 @@ def get_loaders(datasets, num_tasks, nc_first_task, batch_size, num_workers, pin
                                                       crop=dc['crop'],
                                                       flip=dc['flip'],
                                                       normalize=dc['normalize'],
-                                                      extend_channel=dc['extend_channel'])
+                                                      extend_channel=dc['extend_channel'],
+                                                      extra_aug=extra_aug)
 
         # datasets
         trn_dset, val_dset, tst_dset, curtaskcla = get_datasets(cur_dataset, dc['path'], num_tasks, nc_first_task,
@@ -156,12 +160,12 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
     return trn_dset, val_dset, tst_dset, taskcla
 
 
-def get_transforms(resize, pad, crop, flip, normalize, extend_channel):
+def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug=""):
     """Unpack transformations and apply to train or test splits"""
 
     trn_transform_list = []
     tst_transform_list = []
-
+    
     # resize
     if resize is not None:
         trn_transform_list.append(transforms.Resize(resize))
@@ -182,11 +186,16 @@ def get_transforms(resize, pad, crop, flip, normalize, extend_channel):
         trn_transform_list.append(transforms.RandomHorizontalFlip())
 
     trn_transform_list.append(transforms.ColorJitter(brightness=63 / 255))
-
+    if extra_aug == 'fetril':  # Similar as in PyCIL
+        trn_transform_list.append(CIFAR10Policy())
+      
     # to tensor
     trn_transform_list.append(transforms.ToTensor())
     tst_transform_list.append(transforms.ToTensor())
-
+    
+    if extra_aug == 'fetril':  # Similar as in PyCIL
+        trn_transform_list.append(Cutout(n_holes=1, length=16))
+   
     # normalization
     if normalize is not None:
         trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
