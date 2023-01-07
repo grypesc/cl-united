@@ -16,13 +16,25 @@ from .incremental_learning import Inc_Learning_Appr
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
+class FeatureAdaptator(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, hidden_dim)
+        self.activation = nn.GELU()
+        self.out = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x):
+        x = self.activation(self.linear1(x))
+        return self.out(x)
+
+
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="robin",
-                 use_z_score=False, use_head=False, remove_outliers=False):
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="bayes",
+                 use_z_score=False, use_head=False, remove_outliers=False, compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -36,6 +48,7 @@ class Appr(Inc_Learning_Appr):
         self.ft_selection_strategy = ft_selection_strategy
         self.use_head = use_head
         self.remove_outliers = remove_outliers
+        self.compensate_drifts = compensate_drifts
         self.model.to(device)
         self.experts_distributions = []
 
@@ -55,7 +68,7 @@ class Appr(Inc_Learning_Appr):
                             help='Expert selection strategy for fine-tuning',
                             type=str,
                             choices=["robin", "random", "bayes"],
-                            default="robin")
+                            default="bayes")
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
@@ -76,6 +89,10 @@ class Appr(Inc_Learning_Appr):
                             help='Remove class outliers before creating distribution',
                             action='store_true',
                             default=False)
+        parser.add_argument('--compensate-drifts',
+                            help='Drift compensation using MLP feature adaptation',
+                            action='store_true',
+                            default=False)
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
@@ -87,7 +104,10 @@ class Appr(Inc_Learning_Appr):
         else:
             bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader)
             print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
-            self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
+            old_model = self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
+            if self.compensate_drifts:
+                print("Drift compensation:")
+                self._drift_compensation(bb_to_finetune, trn_loader, val_loader, old_model)
 
         # Create distributions
         print(f"Creating distributions for task {t}:")
@@ -246,7 +266,54 @@ class Appr(Inc_Learning_Appr):
 
         model.fc = nn.Identity()
         self.model.bbs[bb_to_finetune] = model
-        torch.save(self.model.state_dict(), "best_{}_{}_ft.pth".format(self.network_type, len(self.model.taskcla)))
+        torch.save(self.model.state_dict(), "best_{}_{}_ft.pth".format(self.model.network_type, len(self.model.taskcla)))
+        return old_model
+
+    def _drift_compensation(self, bb_finetuned, trn_loader, val_loader, old_model):
+        """ Train MLP that predicts drifts and use it to update means of old distributions """
+        feature_adaptator = FeatureAdaptator(self.model.num_features, 256, self.model.num_features)
+        feature_adaptator.to(self.device)
+        optimizer = torch.optim.SGD(feature_adaptator.parameters(), lr=1e-1, weight_decay=1e-3, momentum=self.momentum)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[50, 80], gamma=0.1)
+        model = self.model.bbs[bb_finetuned]
+        model.eval()
+        for epoch in range(100):
+            train_losses, val_losses = [], []
+            feature_adaptator.train()
+            for images, _ in trn_loader:
+                images = images.to(self.device)
+                with torch.no_grad():
+                    old_features = old_model(images)
+                    new_features = model(images)
+                    target_drift = new_features - old_features
+                optimizer.zero_grad()
+                pred_drift = feature_adaptator(old_features)
+                loss = nn.functional.mse_loss(pred_drift, target_drift)
+                loss.backward()
+                optimizer.step()
+                train_losses.append(float(loss))
+            scheduler.step()
+            feature_adaptator.eval()
+            with torch.no_grad():
+                for images, _ in val_loader:
+                    images = images.to(self.device)
+                    old_features = old_model(images)
+                    new_features = model(images)
+                    target_drift = new_features - old_features
+                    pred_drift = feature_adaptator(old_features)
+                    loss = nn.functional.mse_loss(pred_drift, target_drift)
+                    val_losses.append(loss)
+
+            train_loss = sum(train_losses) / len(trn_loader.dataset)
+            valid_loss = sum(val_losses) / len(val_loader.dataset)
+            print(f"Epoch: {epoch} Train loss: {1e3*train_loss:.2f} Val loss: {1e3*valid_loss:.2f} ")
+
+        with torch.no_grad():
+            feature_adaptator.eval()
+            means = torch.stack([d.mu.data[0][0] for d in self.experts_distributions[bb_finetuned]])
+            drifts = feature_adaptator(means)
+            for i, d in enumerate(self.experts_distributions[bb_finetuned]):
+                d.mu.data[0, 0] += drifts[i]
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader):
@@ -326,15 +393,6 @@ class Appr(Inc_Learning_Appr):
             total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
-    def criterion(self, t, outputs, targets, features=None, old_features=None):
-        """Returns the loss value"""
-        ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
-        if old_features is not None:  # Knowledge distillation loss on features
-            kd_loss = nn.functional.mse_loss(features, old_features)
-            total_loss = (1 - self.alpha) * ce_loss + self.alpha * kd_loss
-            return total_loss
-        return ce_loss
-
     @torch.no_grad()
     def calculate_metrics(self, features, targets, t):
         """Contains the main Task-Aware and Task-Agnostic metrics"""
@@ -386,8 +444,17 @@ class Appr(Inc_Learning_Appr):
         tag_class_id = torch.argmax(confidences, dim=1)
         return taw_class_id, tag_class_id
 
-    def _get_optimizer(self, num, wd):
+    def criterion(self, t, outputs, targets, features=None, old_features=None):
+        """Returns the loss value"""
+        ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
+        if old_features is not None:  # Knowledge distillation loss on features
+            kd_loss = nn.functional.mse_loss(features, old_features)
+            total_loss = (1 - self.alpha) * ce_loss + self.alpha * kd_loss
+            return total_loss
+        return ce_loss
+
+    def _get_optimizer(self, num, wd, milestones=[60, 120, 160]):
         """Returns the optimizer"""
         optimizer = torch.optim.SGD(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=wd, momentum=self.momentum)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[60, 120, 160], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
