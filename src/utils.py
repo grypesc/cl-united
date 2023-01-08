@@ -21,14 +21,19 @@ def print_summary(acc_taw, acc_tag, forg_taw, forg_tag):
     for name, metric in zip(['TAw Acc', 'TAg Acc', 'TAw Forg', 'TAg Forg'], [acc_taw, acc_tag, forg_taw, forg_tag]):
         print('*' * 108)
         print(name)
+        avgs = []
         for i in range(metric.shape[0]):
             print('\t', end='')
             for j in range(metric.shape[1]):
                 print('{:5.1f}% '.format(100 * metric[i, j]), end='')
             if np.trace(metric) == 0.0:
                 if i > 0:
-                    print('\tAvg.:{:5.1f}% '.format(100 * metric[i, :i].mean()), end='')
+                    avg = 100 * metric[i, :i].mean()
             else:
-                print('\tAvg.:{:5.1f}% '.format(100 * metric[i, :i + 1].mean()), end='')
-            print()
+                avg = 100 * metric[i, :i + 1].mean()
+            print('\tAvg.:{:5.1f}% \n'.format(avg), end='')
+            avgs.append(avg)
+        if "Acc" in name:
+            print('Average incremental:{:5.1f}% \n'.format(np.mean(avgs)), end='')
+
     print('*' * 108)
