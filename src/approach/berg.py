@@ -16,6 +16,10 @@ from .incremental_learning import Inc_Learning_Appr
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
+def softmax_temperature(x, dim, tau=1.0):
+    return torch.softmax(x / tau, dim=dim)
+
+
 class FeatureAdaptator(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim):
         super().__init__()
@@ -428,13 +432,10 @@ class Appr(Inc_Learning_Appr):
                 log_probs[:, i] = (log_probs[:, i] - mean.unsqueeze(1)) / (std.unsqueeze(1) + 1e-8)
             log_probs[~mask] = -1e12
             log_probs = torch.softmax(10*log_probs, dim=2)
-        else:  # Gumbel approach
+        else:
             taw_log_probs = log_probs[:, :t+1, from_:to_].clone()
-            if len(self.experts_distributions) > 1:
-                taw_log_probs = torch.nn.functional.softmax(taw_log_probs, dim=2)
-
-            if len(self.experts_distributions) > 1:
-                log_probs = torch.nn.functional.gumbel_softmax(log_probs, dim=2, tau=self.tau)
+            taw_log_probs = softmax_temperature(taw_log_probs, dim=2, tau=self.tau)
+            log_probs = softmax_temperature(log_probs, dim=2, tau=self.tau)
 
         # Task-Aware
         confidences = torch.sum(taw_log_probs, dim=1)
