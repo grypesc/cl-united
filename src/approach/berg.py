@@ -43,6 +43,7 @@ class Appr(Inc_Learning_Appr):
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
         self.max_experts = max_experts
+        self.model.bbs = self.model.bbs[:max_experts]
         self.use_z_score = use_z_score
         self.gmms = gmms
         self.alpha = alpha
