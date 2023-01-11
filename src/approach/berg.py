@@ -35,7 +35,7 @@ class FeatureAdaptator(nn.Module):
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
-    def __init__(self, model, device, nepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
+    def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="bayes",
                  use_z_score=False, use_head=False, remove_outliers=False, compensate_drifts=False):
@@ -51,6 +51,7 @@ class Appr(Inc_Learning_Appr):
         self.patience = patience
         self.use_multivariate = use_multivariate
         self.ft_selection_strategy = ft_selection_strategy
+        self.ftepochs = ftepochs
         self.use_head = use_head
         self.remove_outliers = remove_outliers
         self.compensate_drifts = compensate_drifts
@@ -74,6 +75,10 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["robin", "random", "bayes"],
                             default="bayes")
+        parser.add_argument('--ftepochs',
+                            help='Number of epochs for finetuning an expert',
+                            type=int,
+                            default=100)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
@@ -222,8 +227,8 @@ class Appr(Inc_Learning_Appr):
         model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         model.to(self.device)
 
-        optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, 0)
-        for epoch in range(self.nepochs):
+        optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, 0, milestones=[30, 60, 80])
+        for epoch in range(self.ftepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             model.train()
