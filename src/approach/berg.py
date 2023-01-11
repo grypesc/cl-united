@@ -36,7 +36,7 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
-                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="bayes",
                  use_z_score=False, use_head=False, remove_outliers=False, compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
@@ -52,6 +52,7 @@ class Appr(Inc_Learning_Appr):
         self.use_multivariate = use_multivariate
         self.ft_selection_strategy = ft_selection_strategy
         self.ftepochs = ftepochs
+        self.ftwd = ftwd
         self.use_head = use_head
         self.remove_outliers = remove_outliers
         self.compensate_drifts = compensate_drifts
@@ -79,6 +80,10 @@ class Appr(Inc_Learning_Appr):
                             help='Number of epochs for finetuning an expert',
                             type=int,
                             default=100)
+        parser.add_argument('--ftwd',
+                            help='Weight decay for finetuning',
+                            type=float,
+                            default=0)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
@@ -129,7 +134,7 @@ class Appr(Inc_Learning_Appr):
             for param in model.parameters():
                 param.requires_grad = True
         else:
-            self.model.bbs.append(copy.deepcopy(self.model.bbs[-1]))
+            self.model.bbs.append(copy.deepcopy(self.model.bbs[0]))
             model = self.model.bbs[t]
             for name, param in model.named_parameters():
                 param.requires_grad = True
@@ -204,8 +209,8 @@ class Appr(Inc_Learning_Appr):
                 log_likelihoods = torch.zeros((bsz, len(distributions)), device=self.device)
                 for c, class_gmm in enumerate(distributions):
                     log_likelihoods[:, c] = class_gmm.score_samples(features)
-                max_hoods, _ = torch.max(log_likelihoods, dim=1)
-                scores.append(max_hoods)
+                mean_hoods = torch.mean(log_likelihoods, dim=1)
+                scores.append(mean_hoods)
             scores = torch.cat(scores, dim=0)
             expert_scores[bb_num] = torch.mean(scores)
         bb_to_finetune = torch.argmin(expert_scores)
@@ -227,7 +232,7 @@ class Appr(Inc_Learning_Appr):
         model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         model.to(self.device)
 
-        optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, 0, milestones=[30, 60, 80])
+        optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, wd=self.ftwd, milestones=[30, 60, 80])
         for epoch in range(self.ftepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
