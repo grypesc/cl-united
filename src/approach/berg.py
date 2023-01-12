@@ -7,7 +7,6 @@ from argparse import ArgumentParser
 from itertools import compress
 from torch import nn
 from torch.utils.data import Dataset
-from torchvision.transforms import Compose
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .gmm import GaussianMixture
@@ -117,7 +116,7 @@ class Appr(Inc_Learning_Appr):
             self.train_backbone(t, trn_loader, val_loader)
             self.experts_distributions.append([])
         else:
-            bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader)
+            bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader, val_loader)
             print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
             old_model = self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
             if self.compensate_drifts:
@@ -188,12 +187,14 @@ class Appr(Inc_Learning_Appr):
         torch.save(self.model.state_dict(), "best_{}_{}.pth".format(self.model.network_type, len(self.model.taskcla)))
 
     @torch.no_grad()
-    def _choose_backbone_to_finetune(self, t, trn_loader):
+    def _choose_backbone_to_finetune(self, t, trn_loader, val_loader):
         if self.ft_selection_strategy == "robin":
             return t % self.max_experts
         if self.ft_selection_strategy == "random":
             return random.randint(0, self.max_experts-1)
         # Perform expert selection based on distributions overlapping
+        trn_loader = copy.deepcopy(trn_loader)
+        trn_loader.dataset.transform = val_loader.dataset.transform
         self.model.eval()
         expert_scores = torch.zeros((self.max_experts, ), device=self.device)
         for bb_num in range(self.max_experts):
@@ -204,15 +205,16 @@ class Appr(Inc_Learning_Appr):
                 bsz = images.shape[0]
                 images = images.to(self.device)
                 features = model(images)
-                # features_flipped = model(torch.flip(images, dims=(3,)))
-                # features = torch.cat((features, features_flipped), dim=0)
-                log_likelihoods = torch.zeros((bsz, len(distributions)), device=self.device)
+                features_flipped = model(torch.flip(images, dims=(3,)))
+                features = torch.cat((features, features_flipped), dim=0)
+                log_likelihoods = torch.zeros((2*bsz, len(distributions)), device=self.device)
                 for c, class_gmm in enumerate(distributions):
                     log_likelihoods[:, c] = class_gmm.score_samples(features)
                 mean_hoods = torch.mean(log_likelihoods, dim=1)
                 scores.append(mean_hoods)
             scores = torch.cat(scores, dim=0)
             expert_scores[bb_num] = torch.mean(scores)
+        print(f"Expert scores: {expert_scores}")
         bb_to_finetune = torch.argmin(expert_scores)
         return int(bb_to_finetune)
 
@@ -337,11 +339,7 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         classes = self.model.taskcla[t][1]
         self.model.task_offset.append(self.model.task_offset[-1] + classes)
-        transforms = Compose([tr for tr in val_loader.dataset.transform.transforms
-                              if "Resize" in tr.__class__.__name__
-                              or "CenterCrop" in tr.__class__.__name__
-                              or "ToTensor" in tr.__class__.__name__
-                              or "Normalize" in tr.__class__.__name__])
+        transforms = val_loader.dataset.transform
         for bb_num in range(min(self.max_experts, t+1)):
             model = self.model.bbs[bb_num]
             for c in range(classes):
