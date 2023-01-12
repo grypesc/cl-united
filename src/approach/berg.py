@@ -1,6 +1,5 @@
 import copy
 import random
-import numpy as np
 import torch
 
 from argparse import ArgumentParser
@@ -210,8 +209,9 @@ class Appr(Inc_Learning_Appr):
                 log_likelihoods = torch.zeros((2*bsz, len(distributions)), device=self.device)
                 for c, class_gmm in enumerate(distributions):
                     log_likelihoods[:, c] = class_gmm.score_samples(features)
-                mean_hoods = torch.mean(log_likelihoods, dim=1)
-                scores.append(mean_hoods)
+                log_likelihoods = softmax_temperature(log_likelihoods, dim=1, tau=self.tau)
+                max_hoods, _ = torch.max(log_likelihoods, dim=1)
+                scores.append(max_hoods)
             scores = torch.cat(scores, dim=0)
             expert_scores[bb_num] = torch.mean(scores)
         print(f"Expert scores: {expert_scores}")
