@@ -40,6 +40,14 @@ dataset_config = {
             36, 61, 7, 63, 75, 5, 32, 4, 51, 48, 73, 93, 39, 67, 29, 49, 57, 33
         ]
     },
+    'cifar100_224': {
+        'path': join(_BASE_DATA_PATH, 'cifar100'),
+        'resize': 256,
+        'pad': 0,
+        'crop': 224,
+        'flip': True,
+        'normalize': ((0.5071, 0.4866, 0.4409), (0.2009, 0.1984, 0.2023)),
+    },
     'cifar100_icarl_224': {
         'path': join(_BASE_DATA_PATH, 'cifar100'),
         'resize': 256,
