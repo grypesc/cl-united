@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 from itertools import compress
 from torch import nn
 from torch.utils.data import Dataset
+from torch.distributions import MultivariateNormal
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .gmm import GaussianMixture
@@ -114,17 +115,19 @@ class Appr(Inc_Learning_Appr):
             print(f"Training backbone on task {t}:")
             self.train_backbone(t, trn_loader, val_loader)
             self.experts_distributions.append([])
-        else:
-            bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader, val_loader)
-            print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
-            old_model = self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
-            if self.compensate_drifts:
-                print("Drift compensation:")
-                self._drift_compensation(bb_to_finetune, trn_loader, val_loader, old_model)
-
         # Create distributions
         print(f"Creating distributions for task {t}:")
         self.create_distributions(t, trn_loader, val_loader)
+
+        if t >= self.max_experts:
+            bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader, val_loader)
+            print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
+            old_model = self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
+            print(f"Creating distributions #2 for task {t}:")
+            self.create_distributions(t, trn_loader, val_loader)
+            if self.compensate_drifts:
+                print("Drift compensation:")
+                self._drift_compensation(bb_to_finetune, trn_loader, val_loader, old_model)
 
     def train_backbone(self, t, trn_loader, val_loader):
         if t == 0:
@@ -192,31 +195,23 @@ class Appr(Inc_Learning_Appr):
         if self.ft_selection_strategy == "random":
             return random.randint(0, self.max_experts-1)
         # Perform expert selection based on distributions overlapping
-        trn_loader = copy.deepcopy(trn_loader)
-        trn_loader.dataset.transform = val_loader.dataset.transform
-        self.model.eval()
-        expert_scores = torch.zeros((self.max_experts, ), device=self.device)
+        expert_overlap = torch.zeros(self.max_experts, device=self.device)
         for bb_num in range(self.max_experts):
-            distributions = self.experts_distributions[bb_num]
-            model = self.model.bbs[bb_num]
-            scores = []
-            for images, _ in trn_loader:
-                bsz = images.shape[0]
-                images = images.to(self.device)
-                features = model(images)
-                features_flipped = model(torch.flip(images, dims=(3,)))
-                features = torch.cat((features, features_flipped), dim=0)
-                log_likelihoods = torch.zeros((2*bsz, len(distributions)), device=self.device)
-                for c, class_gmm in enumerate(distributions):
-                    log_likelihoods[:, c] = class_gmm.score_samples(features)
-                log_likelihoods = softmax_temperature(log_likelihoods, dim=1, tau=self.tau)
-                max_hoods, _ = torch.max(log_likelihoods, dim=1)
-                scores.append(max_hoods)
-            scores = torch.cat(scores, dim=0)
-            expert_scores[bb_num] = torch.mean(scores)
-        print(f"Expert scores: {expert_scores}")
-        bb_to_finetune = torch.argmin(expert_scores)
-        return int(bb_to_finetune)
+            classes_in_t = self.model.taskcla[t][1]
+            old_distributions = self.experts_distributions[bb_num][:-classes_in_t]
+            new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
+            kl_matrix = torch.zeros((len(new_distributions), len(old_distributions)), device=self.device)
+            for o, old_gauss_ in enumerate(old_distributions):
+                old_gauss = MultivariateNormal(old_gauss_.mu.data[0][0], covariance_matrix=old_gauss_.var.data[0][0])
+                for n, new_gauss_ in enumerate(new_distributions):
+                    new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
+                    kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
+            expert_overlap[bb_num] = torch.mean(kl_matrix)
+            self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
+        print(f"Expert overlap:{expert_overlap}")
+        bb_to_finetune = torch.argmax(expert_overlap)
+        self.model.task_offset = self.model.task_offset[:-1]
+        return bb_to_finetune
 
     def finetune_backbone(self, t, bb_to_finetune, trn_loader, val_loader):
         """ This time use knowledge distillation to not let old distributions to drift too much """
