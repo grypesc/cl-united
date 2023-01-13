@@ -36,7 +36,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="bayes",
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="softmax",
                  use_z_score=False, use_head=False, remove_outliers=False, compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -73,8 +73,8 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--ft-selection-strategy',
                             help='Expert selection strategy for fine-tuning',
                             type=str,
-                            choices=["robin", "random", "bayes"],
-                            default="bayes")
+                            choices=["robin", "random", "softmax", "kl"],
+                            default="softmax")
         parser.add_argument('--ftepochs',
                             help='Number of epochs for finetuning an expert',
                             type=int,
@@ -110,7 +110,6 @@ class Appr(Inc_Learning_Appr):
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
-        # Train backbone
         if t < self.max_experts:
             print(f"Training backbone on task {t}:")
             self.train_backbone(t, trn_loader, val_loader)
@@ -192,26 +191,54 @@ class Appr(Inc_Learning_Appr):
             return t % self.max_experts
         if self.ft_selection_strategy == "random":
             return random.randint(0, self.max_experts-1)
-        # Perform expert selection based on distributions overlapping
-        print(f"Creating distributions #2 for task {t}:")
-        self.create_distributions(t, trn_loader, val_loader)
-        expert_overlap = torch.zeros(self.max_experts, device=self.device)
-        for bb_num in range(self.max_experts):
-            classes_in_t = self.model.taskcla[t][1]
-            old_distributions = self.experts_distributions[bb_num][:-classes_in_t]
-            new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
-            kl_matrix = torch.zeros((len(new_distributions), len(old_distributions)), device=self.device)
-            for o, old_gauss_ in enumerate(old_distributions):
-                old_gauss = MultivariateNormal(old_gauss_.mu.data[0][0], covariance_matrix=old_gauss_.var.data[0][0])
-                for n, new_gauss_ in enumerate(new_distributions):
-                    new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
-                    kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
-            expert_overlap[bb_num] = torch.topk(kl_matrix, dim=1, k=3, largest=False)[0].mean()
-            self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
-        print(f"Expert overlap:{expert_overlap}")
-        bb_to_finetune = torch.argmax(expert_overlap)
-        self.model.task_offset = self.model.task_offset[:-1]
-        return bb_to_finetune
+        if self.ft_selection_strategy == "kl":
+            # Perform expert selection based on KL divergence between old and new distributions
+            print(f"Creating distributions #2 for task {t}:")
+            self.create_distributions(t, trn_loader, val_loader)
+            expert_overlap = torch.zeros(self.max_experts, device=self.device)
+            for bb_num in range(self.max_experts):
+                classes_in_t = self.model.taskcla[t][1]
+                old_distributions = self.experts_distributions[bb_num][:-classes_in_t]
+                new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
+                kl_matrix = torch.zeros((len(new_distributions), len(old_distributions)), device=self.device)
+                for o, old_gauss_ in enumerate(old_distributions):
+                    old_gauss = MultivariateNormal(old_gauss_.mu.data[0][0], covariance_matrix=old_gauss_.var.data[0][0])
+                    for n, new_gauss_ in enumerate(new_distributions):
+                        new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
+                        kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
+                expert_overlap[bb_num] = torch.topk(kl_matrix, dim=1, k=3, largest=False)[0].mean()
+                self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
+            print(f"Expert overlap:{expert_overlap}")
+            bb_to_finetune = torch.argmax(expert_overlap)
+            self.model.task_offset = self.model.task_offset[:-1]
+            return bb_to_finetune
+        if self.ft_selection_strategy == "softmax":
+            # Perform expert selection based on new samples overlapping with old distributions
+            trn_loader = copy.deepcopy(trn_loader)
+            trn_loader.dataset.transform = val_loader.dataset.transform
+            self.model.eval()
+            expert_scores = torch.zeros((self.max_experts, ), device=self.device)
+            for bb_num in range(self.max_experts):
+                distributions = self.experts_distributions[bb_num]
+                model = self.model.bbs[bb_num]
+                scores = []
+                for images, _ in trn_loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device)
+                    features = model(images)
+                    features_flipped = model(torch.flip(images, dims=(3,)))
+                    features = torch.cat((features, features_flipped), dim=0)
+                    log_likelihoods = torch.zeros((2*bsz, len(distributions)), device=self.device)
+                    for c, class_gmm in enumerate(distributions):
+                        log_likelihoods[:, c] = class_gmm.score_samples(features)
+                    log_likelihoods = softmax_temperature(log_likelihoods, dim=1, tau=self.tau)
+                    max_hoods, _ = torch.max(log_likelihoods, dim=1)
+                    scores.append(max_hoods)
+                scores = torch.cat(scores, dim=0)
+                expert_scores[bb_num] = torch.mean(scores)
+            print(f"Expert scores: {expert_scores}")
+            bb_to_finetune = torch.argmin(expert_scores)
+            return int(bb_to_finetune)
 
     def finetune_backbone(self, t, bb_to_finetune, trn_loader, val_loader):
         """ This time use knowledge distillation to not let old distributions to drift too much """
