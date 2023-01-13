@@ -115,19 +115,17 @@ class Appr(Inc_Learning_Appr):
             print(f"Training backbone on task {t}:")
             self.train_backbone(t, trn_loader, val_loader)
             self.experts_distributions.append([])
-        # Create distributions
-        print(f"Creating distributions for task {t}:")
-        self.create_distributions(t, trn_loader, val_loader)
 
         if t >= self.max_experts:
             bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader, val_loader)
             print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
             old_model = self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
-            print(f"Creating distributions #2 for task {t}:")
-            self.create_distributions(t, trn_loader, val_loader)
             if self.compensate_drifts:
                 print("Drift compensation:")
                 self._drift_compensation(bb_to_finetune, trn_loader, val_loader, old_model)
+
+        print(f"Creating distributions for task {t}:")
+        self.create_distributions(t, trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader):
         if t == 0:
@@ -195,6 +193,8 @@ class Appr(Inc_Learning_Appr):
         if self.ft_selection_strategy == "random":
             return random.randint(0, self.max_experts-1)
         # Perform expert selection based on distributions overlapping
+        print(f"Creating distributions #2 for task {t}:")
+        self.create_distributions(t, trn_loader, val_loader)
         expert_overlap = torch.zeros(self.max_experts, device=self.device)
         for bb_num in range(self.max_experts):
             classes_in_t = self.model.taskcla[t][1]
