@@ -206,7 +206,7 @@ class Appr(Inc_Learning_Appr):
                 for n, new_gauss_ in enumerate(new_distributions):
                     new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
                     kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
-            expert_overlap[bb_num] = torch.mean(kl_matrix)
+            expert_overlap[bb_num] = torch.topk(kl_matrix, dim=1, k=3, largest=False)[0].mean()
             self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
         print(f"Expert overlap:{expert_overlap}")
         bb_to_finetune = torch.argmax(expert_overlap)
