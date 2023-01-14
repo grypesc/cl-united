@@ -1,4 +1,4 @@
-import os
+import os, glob
 import numpy as np
 from torch.utils import data
 import torchvision.transforms as transforms
@@ -9,7 +9,7 @@ from torchvision.datasets import SVHN as TorchVisionSVHN
 from . import base_dataset as basedat
 from . import memory_dataset as memd
 from .dataset_config import dataset_config
-from .autoaugment import CIFAR10Policy
+from .autoaugment import CIFAR10Policy, ImageNetPolicy
 from .ops import Cutout
 
 
@@ -31,7 +31,7 @@ def get_loaders(datasets, num_tasks, nc_first_task, batch_size, num_workers, pin
                                                       flip=dc['flip'],
                                                       normalize=dc['normalize'],
                                                       extend_channel=dc['extend_channel'],
-                                                      extra_aug=extra_aug)
+                                                      extra_aug=extra_aug, ds_name=cur_dataset)
 
         # datasets
         trn_dset, val_dset, tst_dset, curtaskcla = get_datasets(cur_dataset, dc['path'], num_tasks, nc_first_task,
@@ -139,6 +139,9 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
         Dataset = memd.MemoryDataset
 
     else:
+        if dataset == 'imagenet_subset_kaggle':
+            _ensure_imagenet_subset_prepared(path)
+
         # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
                                                             validation=validation, shuffle_classes=class_order is None,
@@ -160,7 +163,7 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
     return trn_dset, val_dset, tst_dset, taskcla
 
 
-def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug=""):
+def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug="", ds_name=""):
     """Unpack transformations and apply to train or test splits"""
 
     trn_transform_list = []
@@ -187,7 +190,12 @@ def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug
 
     trn_transform_list.append(transforms.ColorJitter(brightness=63 / 255))
     if extra_aug == 'fetril':  # Similar as in PyCIL
-        trn_transform_list.append(CIFAR10Policy())
+        if 'cifar' in ds_name.lower():
+            trn_transform_list.append(CIFAR10Policy())
+        elif 'imagenet' in ds_name.lower():
+            trn_transform_list.append(ImageNetPolicy())
+        else:
+            raise RuntimeError(f'Please check and update the data agumentation code for your dataset: {ds_name}')
       
     # to tensor
     trn_transform_list.append(transforms.ToTensor())
@@ -208,3 +216,18 @@ def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug
 
     return transforms.Compose(trn_transform_list), \
            transforms.Compose(tst_transform_list)
+
+
+def _ensure_imagenet_subset_prepared(path):
+    assert os.path.exists(path), f"Please first download and extract dataset from: https://www.kaggle.com/datasets/arjunashok33/imagenet-subset-for-inc-learn to dir: {path}"
+    ds_conf = dataset_config['imagenet_subset_kaggle']
+    clsss2idx = {c:i for i, c in enumerate(ds_conf['lbl_order'])}
+    def prepare_split(split='train', outfile='train.txt'):    
+        with open(f"{path}/{outfile}", 'wt') as f:
+            for fn in glob.glob(f"{path}/data/{split}/*/*"):
+                c = fn.split('/')[-2]    
+                lbl = clsss2idx[c]
+                f.write(f"{fn} {lbl}\n")
+    prepare_split()
+    prepare_split('val', outfile='test.txt')
+    
