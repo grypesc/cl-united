@@ -222,14 +222,13 @@ def _ensure_imagenet_subset_prepared(path):
     assert os.path.exists(path), f"Please first download and extract dataset from: https://www.kaggle.com/datasets/arjunashok33/imagenet-subset-for-inc-learn to dir: {path}"
     ds_conf = dataset_config['imagenet_subset_kaggle']
     clsss2idx = {c:i for i, c in enumerate(ds_conf['lbl_order'])}
-
+    print(f'Generating train/test splits for ImageNet-Subset directory: {path}')
     def prepare_split(split='train', outfile='train.txt'):    
         with open(f"{path}/{outfile}", 'wt') as f:
             for fn in glob.glob(f"{path}/data/{split}/*/*"):
                 c = fn.split('/')[-2]    
                 lbl = clsss2idx[c]
-                file_name = "".join([s+"/" for s in fn.split("/")[3:]])[:-1]
-                f.write(f"{file_name} {lbl}\n")
+                relative_path = fn.replace(f"{path}/", '')
+                f.write(f"{relative_path} {lbl}\n")
     prepare_split()
     prepare_split('val', outfile='test.txt')
-    
