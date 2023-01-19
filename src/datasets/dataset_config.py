@@ -114,7 +114,7 @@ dataset_config = {
     },
     'imagenet_subset_kaggle': {
         'path': join(_BASE_DATA_PATH, 'seed_1993_subset_100_imagenet'),
-        'resize': None,
+        'resize': 256,
         'crop': 224,
         'flip': True,
         'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
