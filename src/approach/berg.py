@@ -378,7 +378,7 @@ class Appr(Inc_Learning_Appr):
                     ds = trn_loader.dataset.images[train_indices]
                     # ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
                     ds = ClassMemoryDataset(ds, transforms)
-                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
                 from_ = 0
                 class_features = torch.full((2 * len(ds), self.model.num_features), fill_value=-999999999.0, device=self.model.device)
                 for images in loader:
