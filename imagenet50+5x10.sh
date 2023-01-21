@@ -1,5 +1,5 @@
 #!/bin/bash
-for SEED in 0
+for SEED in 1
 do
   for NUM_EXPERTS in 5
   do
