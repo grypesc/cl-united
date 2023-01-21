@@ -7,6 +7,7 @@ from copy import deepcopy
 # from torchvision.models import resnet18
 from .resnet32_linear_turbo import resnet32
 from .resnet_linear_turbo import resnet18, resnet34, resnet50
+from .resnet32_linear_bottleneck import resnet20
 
 
 class LLL_Net(nn.Module):
@@ -168,6 +169,9 @@ class ExtractorEnsemble(LLL_Net):
             bb = resnet50(num_classes=taskcla[0][1], num_features=self.num_features)
         elif network_type == "resnet32":
             bb = resnet32(num_classes=taskcla[0][1])
+        elif network_type == "resnet20":
+            self.num_features = 24
+            bb = resnet20(num_classes=taskcla[0][1], num_features=self.num_features)
         else:
             print("This network is not supported by EGE, using resnet32.")
             bb = resnet32(num_classes=taskcla[0][1])

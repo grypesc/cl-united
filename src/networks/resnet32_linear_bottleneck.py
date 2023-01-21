@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 __all__ = ['resnet32']
@@ -31,6 +32,29 @@ class BasicBlock(nn.Module):
         return self.relu(out)
 
 
+class NoReLUBasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(NoReLUBasicBlock, self).__init__()
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            residual = self.downsample(x)
+        out += residual
+        return out
+
+
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -59,7 +83,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=10):
+    def __init__(self, block, layers, num_classes=10, num_features=32):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
@@ -67,10 +91,10 @@ class ResNet(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.layer1 = self._make_layer(block, 16, layers[0])
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
-        self.avgpool = nn.AvgPool2d(8, stride=1)
+        self.layer3 = self._make_layer(NoReLUBasicBlock, 64, layers[2], stride=2)
+        self.bottleneck = nn.Conv2d(64, num_features, 1, stride=1)
         # last classifier layer (head) with as many outputs as classes
-        self.fc = nn.Linear(64 * block.expansion, num_classes)
+        self.fc = nn.Linear(num_features, num_classes)
         # and `head_var` with the name of the head, so it can be removed when doing incremental learning experiments
         self.head_var = 'fc'
 
@@ -95,15 +119,30 @@ class ResNet(nn.Module):
             layers.append(block(self.inplanes, planes))
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
+        x = self.bottleneck(x)
+        features = torch.mean(x, dim=(2, 3))
+        # x = nn.functional.normalize(x, p=2.0, dim=1, eps=1e-12)
+        x = self.fc(features)
+        if return_features:
+            return x, features
         return x
+
+    # def calculate_semi_features(self, x):
+    #     x = self.relu(self.bn1(self.conv1(x)))
+    #     x = self.layer1(x)
+    #     return x
+    #
+    # def forward_semi_features(self, x):
+    #     x = self.layer2(x)
+    #     x = self.layer3(x)
+    #     x = torch.mean(x, dim=(2, 3))
+    #     x = self.fc(x)
+    #     return x
 
 
 def resnet32(pretrained=False, **kwargs):
@@ -118,8 +157,6 @@ def resnet32(pretrained=False, **kwargs):
 def resnet20(pretrained=False, **kwargs):
     if pretrained:
         raise NotImplementedError
-    # change n=3 for ResNet-20, and n=9 for ResNet-56
     n = 3
     model = ResNet(BasicBlock, [n, n, n], **kwargs)
     return model
-
