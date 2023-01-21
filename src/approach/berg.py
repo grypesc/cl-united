@@ -57,6 +57,7 @@ class Appr(Inc_Learning_Appr):
         self.compensate_drifts = compensate_drifts
         self.model.to(device)
         self.experts_distributions = []
+        self.layers_trainable = ["layer1", "layer2", "layer3", "layer4", "bottleneck"]
 
     @staticmethod
     def extra_parser(args):
@@ -135,12 +136,13 @@ class Appr(Inc_Learning_Appr):
             self.model.bbs.append(copy.deepcopy(self.model.bbs[0]))
             model = self.model.bbs[t]
             for name, param in model.named_parameters():
-                param.requires_grad = True
-                # if "layer2" in name or "layer3" in name or "layer4" in name:
-                #     param.requires_grad = True
+                param.requires_grad = False
+                for layer in self.layers_trainable:
+                    if layer in name:
+                        param.requires_grad = True
             model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-        print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
 
         model.to(self.device)
         optimizer, lr_scheduler = self._get_optimizer(t, self.wd)
@@ -251,8 +253,9 @@ class Appr(Inc_Learning_Appr):
         model = self.model.bbs[bb_to_finetune]
         for name, param in model.named_parameters():
             param.requires_grad = False
-            if "layer2" in name or "layer3" in name or "layer4" in name:
-                param.requires_grad = True
+            for layer in self.layers_trainable:
+                if layer in name:
+                    param.requires_grad = True
         model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         model.to(self.device)
 
