@@ -26,6 +26,7 @@ def get_loaders(datasets, num_tasks, nc_first_task, batch_size, num_workers, pin
 
         # transformations
         trn_transform, tst_transform = get_transforms(resize=dc['resize'],
+                                                      test_resize=dc['test_resize'],
                                                       pad=dc['pad'],
                                                       crop=dc['crop'],
                                                       flip=dc['flip'],
@@ -163,7 +164,7 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
     return trn_dset, val_dset, tst_dset, taskcla
 
 
-def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug="", ds_name=""):
+def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_channel, extra_aug="", ds_name=""):
     """Unpack transformations and apply to train or test splits"""
 
     trn_transform_list = []
@@ -178,6 +179,10 @@ def get_transforms(resize, pad, crop, flip, normalize, extend_channel, extra_aug
     if pad is not None:
         trn_transform_list.append(transforms.Pad(pad))
         tst_transform_list.append(transforms.Pad(pad))
+
+    # test only resize
+    if test_resize is not None:
+        tst_transform_list.append(transforms.Resize(test_resize))
 
     # crop
     if crop is not None:

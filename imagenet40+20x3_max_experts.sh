@@ -1,0 +1,8 @@
+#!/bin/bash
+for SEED in 0
+do
+  for NUM_EXPERTS in 21
+  do
+    python main_incremental.py --approach berg --gmms 1 --max-experts $NUM_EXPERTS --use-multivariate --ft-selection-strategy softmax  --nepochs 200 --tau 3 --batch-size 256 --num-workers 12 --datasets imagenet_subset_kaggle --num-tasks 21 --nc-first-task 40 --lr 0.05 --weight-decay 5e-4 --clipping 1 --alpha 0.99 --extra-aug fetril --use-test-as-val --network resnet18  --momentum 0.9 --exp-name imagenet_40+20x3_$NUM_EXPERTS --seed $SEED
+  done
+done

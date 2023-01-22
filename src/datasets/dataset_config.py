@@ -114,7 +114,7 @@ dataset_config = {
     },
     'imagenet_subset_kaggle': {
         'path': join(_BASE_DATA_PATH, 'seed_1993_subset_100_imagenet'),
-        'resize': 256,
+        'test_resize': 256,
         'crop': 224,
         'flip': True,
         'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
@@ -125,7 +125,7 @@ dataset_config = {
 
 # Add missing keys:
 for dset in dataset_config.keys():
-    for k in ['resize', 'pad', 'crop', 'normalize', 'class_order', 'extend_channel']:
+    for k in ['test_resize', 'resize', 'pad', 'crop', 'normalize', 'class_order', 'extend_channel']:
         if k not in dataset_config[dset].keys():
             dataset_config[dset][k] = None
     if 'flip' not in dataset_config[dset].keys():
