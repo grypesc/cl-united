@@ -36,7 +36,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=True, ft_selection_strategy="softmax",
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
                  use_z_score=False, use_head=False, remove_outliers=False, compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -49,6 +49,7 @@ class Appr(Inc_Learning_Appr):
         self.tau = tau
         self.patience = patience
         self.use_multivariate = use_multivariate
+        self.use_nmc = use_nmc
         self.ft_selection_strategy = ft_selection_strategy
         self.ftepochs = ftepochs
         self.ftwd = ftwd
@@ -86,6 +87,10 @@ class Appr(Inc_Learning_Appr):
                             default=0)
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
+                            action='store_true',
+                            default=False)
+        parser.add_argument('--use-nmc',
+                            help='Use nearest mean classifier instead of bayes',
                             action='store_true',
                             default=False)
         parser.add_argument('--use-z-score',
@@ -411,6 +416,8 @@ class Appr(Inc_Learning_Appr):
                         print(f"WARNING: Covariance matrix is singular. Increasing eps to: {eps:.7f} but this may hurt results")
                     else:
                         is_ok = True
+                        if self.use_nmc:
+                            gmm.var = torch.nn.Parameter(torch.ones(self.model.num_features, device=self.device).unsqueeze(0).unsqueeze(0))
 
                 self.experts_distributions[bb_num].append(gmm)
 
