@@ -37,13 +37,12 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
-                 use_z_score=False, use_head=False, remove_outliers=False, compensate_drifts=False):
+                 remove_outliers=False, compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
         self.max_experts = max_experts
         self.model.bbs = self.model.bbs[:max_experts]
-        self.use_z_score = use_z_score
         self.gmms = gmms
         self.alpha = alpha
         self.tau = tau
@@ -53,7 +52,6 @@ class Appr(Inc_Learning_Appr):
         self.ft_selection_strategy = ft_selection_strategy
         self.ftepochs = ftepochs
         self.ftwd = ftwd
-        self.use_head = use_head
         self.remove_outliers = remove_outliers
         self.compensate_drifts = compensate_drifts
         self.model.to(device)
@@ -91,10 +89,6 @@ class Appr(Inc_Learning_Appr):
                             default=False)
         parser.add_argument('--use-nmc',
                             help='Use nearest mean classifier instead of bayes',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--use-z-score',
-                            help='Replace gumbel softmax with z-score normalized softmax',
                             action='store_true',
                             default=False)
         parser.add_argument('--alpha',
@@ -448,7 +442,6 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def predict_class_bayes(self, t, features):
-        bsz = features.shape[0]
         log_probs = torch.full((features.shape[0], len(self.experts_distributions), len(self.experts_distributions[0])), fill_value=-1e8, device=features.device)
         mask = torch.full_like(log_probs, fill_value=False, dtype=torch.bool)
         for bb_num, _ in enumerate(self.experts_distributions):
@@ -459,29 +452,14 @@ class Appr(Inc_Learning_Appr):
 
         from_ = self.model.task_offset[t]
         to_ = self.model.task_offset[t+1]
-        if self.use_z_score:
-            taw_log_probs = log_probs[:, :t+1, from_:to_].clone()
-            for i in range(min(t+1, len(self.experts_distributions))):
-                mean = torch.mean(taw_log_probs[:, i], dim=1)
-                std = torch.std(taw_log_probs[:, i], dim=1)
-                taw_log_probs[:, i] = (taw_log_probs[:, i] - mean.unsqueeze(1)) / (std.unsqueeze(1) + 1e-8)
-            taw_log_probs = torch.softmax(10*taw_log_probs, dim=2)
-
-            for i in range(len(self.experts_distributions)):
-                mean = torch.mean(log_probs[:, i][mask[:, i]].reshape(bsz, -1), dim=1)
-                std = torch.std(log_probs[:, i][mask[:, i]].reshape(bsz, -1), dim=1)
-                log_probs[:, i] = (log_probs[:, i] - mean.unsqueeze(1)) / (std.unsqueeze(1) + 1e-8)
-            log_probs[~mask] = -1e12
-            log_probs = torch.softmax(10*log_probs, dim=2)
-        else:
-            taw_log_probs = log_probs[:, :t+1, from_:to_].clone()
-            taw_log_probs = softmax_temperature(taw_log_probs, dim=2, tau=self.tau)
-            log_probs = softmax_temperature(log_probs, dim=2, tau=self.tau)
 
         # Task-Aware
+        taw_log_probs = log_probs[:, :t+1, from_:to_].clone()
+        taw_log_probs = softmax_temperature(taw_log_probs, dim=2, tau=self.tau)
         confidences = torch.sum(taw_log_probs, dim=1)
         taw_class_id = torch.argmax(confidences, dim=1) + self.model.task_offset[t]
         # Task-Agnostic
+        log_probs = softmax_temperature(log_probs, dim=2, tau=self.tau)
         confidences = torch.sum(log_probs, dim=1) / torch.sum(mask, dim=1)
         tag_class_id = torch.argmax(confidences, dim=1)
         return taw_class_id, tag_class_id
