@@ -13,40 +13,49 @@ torch.backends.cuda.matmul.allow_tf32 = False
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, in_planes, out_planes, downsample=False):
+    def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_planes, in_planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(in_planes)
-        self.conv2 = nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_planes)
-        self.pool = nn.MaxPool2d(2)
-        self.activation = nn.LeakyReLU()
+        planes = 32
+        self.layers = nn.Sequential(nn.Conv2d(3, planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(planes, 2*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(2*planes, 4*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.MaxPool2d((2, 2)),
+                                    nn.Conv2d(4*planes, 8*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(8*planes, 4*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.MaxPool2d((2, 2)),
+                                    nn.Conv2d(4*planes, 2*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(2*planes, planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(planes, 8, kernel_size=3, stride=1, padding=1)
+                                    )# 8x8x8
 
     def forward(self, x):
-        x = self.activation(self.bn1(self.conv1(x))) + x
-        x = self.activation(self.bn2(self.conv2(x)))
-        x = self.pool(x)
+        x = self.layers(x)
         return x
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_planes, out_planes):
+    def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_planes, in_planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(in_planes)
-        self.conv2 = nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_planes)
-        self.upsample = nn.UpsamplingBilinear2d(scale_factor=2)
-        self.activation = nn.LeakyReLU()
+        planes = 32
+        self.layers = nn.Sequential(nn.Conv2d(8, planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(planes, 2*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.UpsamplingBilinear2d(scale_factor=2),
+                                    nn.Conv2d(2*planes, 4*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(4*planes, 8*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.UpsamplingBilinear2d(scale_factor=2),
+                                    nn.Conv2d(8*planes, 4*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(4*planes, 2*planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(2*planes, planes, kernel_size=3, stride=1, padding=1), nn.LeakyReLU(),
+                                    nn.Conv2d(planes, 3, kernel_size=3, stride=1, padding=1)
+                                    )
 
     def forward(self, x):
-        x = self.activation(self.bn1(self.conv1(x))) + x
-        x = self.activation(self.bn2(self.conv2(x)))
-        x = self.upsample(x)
+        x = self.layers(x)
         return x
 
 
 class VisualCortex(nn.Module):
+    """https://github.com/Puayny/Autoencoder-image-similarity/blob/master/Autoencoder%2C%20cifar-100%20dataset.ipynb"""
     def __init__(self, z_size, planes=(3, 64, 128, 256, 512)):
         super().__init__()
         self.z_size = z_size
@@ -54,20 +63,15 @@ class VisualCortex(nn.Module):
 
         self.linear1 = nn.Conv2d(planes[0], planes[1], kernel_size=3, stride=2, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes[1])
-        self.encoder = nn.Sequential(*[EncoderBlock(planes[i], planes[i+1]) for i in range(1, len(planes)-1)])
-        self.decoder = nn.Sequential(*[DecoderBlock(planes[i], planes[i-1]) for i in range(len(planes)-1, 0, -1)])
-        self.linear_enc = nn.Linear(planes[-1] * 4, z_size)
-        self.linear_dec = nn.Linear(z_size, planes[-1] * 4)
+        self.encoder = EncoderBlock()
+        self.decoder = DecoderBlock()
 
     def forward(self, x, decode=True):
-        x = self.bn1(self.linear1(x))
         x = self.encoder(x)
-        x = x.reshape(x.shape[0], -1)
-        z = self.linear_enc(x)
+        z = x.reshape(x.shape[0], -1)
         if not decode:
             return z, None
-        x = self.linear_dec(z)
-        x = x.reshape(x.shape[0], 512, 2, 2)
+        x = z.reshape(x.shape[0], 8, 8, 8)
         x = self.decoder(x)
         return z, x
 
@@ -78,20 +82,20 @@ class VisualCortex(nn.Module):
         target = target.permute(1, 2, 0)
         mean = torch.tensor([0.5071, 0.4866, 0.4409]).unsqueeze(0).unsqueeze(0)
         std = torch.tensor([0.2009, 0.1984, 0.2023]).unsqueeze(0).unsqueeze(0)
-        out = torch.clip(255*(out * std + mean), min=0, max=255)
-        target = torch.clip(255*(target * std + mean), min=0, max=255)
+        out = torch.clip(255 * (out * std + mean), min=0, max=255)
+        target = torch.clip(255 * (target * std + mean), min=0, max=255)
         out = Image.fromarray(np.array(out, dtype=np.uint8))
         target = Image.fromarray(np.array(target, dtype=np.uint8))
         out.save("a_out.png")
         target.save("a_gt.png")
-        target.save("a_gt.png")
+        # target.save("a_gt.png")
 
 
 class MLP(nn.Module):
     def __init__(self, z_size, hidden_size, out_size):
         super().__init__()
-        self.linear1 = nn.Linear(z_size, 2*hidden_size)
-        self.linear2 = nn.Linear(2*hidden_size, hidden_size)
+        self.linear1 = nn.Linear(z_size, 2 * hidden_size)
+        self.linear2 = nn.Linear(2 * hidden_size, hidden_size)
         self.out = nn.Linear(hidden_size, out_size)
         self.activation = nn.LeakyReLU()
 
@@ -143,7 +147,7 @@ class Appr(Inc_Learning_Appr):
         model = self.cortex
         print(f'Cortex has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         model.to(self.device)
-        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 100, 150, 190])
+        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 80, 150, 190])
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             model.train()
@@ -192,7 +196,7 @@ class Appr(Inc_Learning_Appr):
                 optimizer.zero_grad()
                 with torch.no_grad():
                     embeddings, _ = self.cortex(images, decode=True)
-                    self.cortex.visualize(_, images)
+                    # self.cortex.visualize(_, images)
                 out = model(embeddings)
                 loss = self.criterion(out, targets)
                 loss.backward()
@@ -254,6 +258,6 @@ class Appr(Inc_Learning_Appr):
 
     def _get_optimizer(self, model, wd, milestones=[60, 120, 160]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(model.parameters(), lr=self.lr, weight_decay=wd, momentum=self.momentum)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
