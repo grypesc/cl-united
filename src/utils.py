@@ -3,8 +3,6 @@ import torch
 import random
 import numpy as np
 
-cudnn_deterministic = True
-
 
 def seed_everything(seed=0):
     """Fix all random seeds"""
@@ -13,7 +11,6 @@ def seed_everything(seed=0):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
-    torch.backends.cudnn.deterministic = cudnn_deterministic
 
 
 def print_summary(acc_taw, acc_tag, forg_taw, forg_tag):
