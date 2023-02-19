@@ -172,11 +172,14 @@ class Appr(Inc_Learning_Appr):
         print(f'Cortex has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         model.to(self.device)
         old_model.to(self.device)
-
+        epochs = self.nepochs
+        milestones = [50, 100, 150]
         if len(self.membeddings) > 0:
             mem_loader = torch.utils.data.DataLoader(self.membeddings, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
-        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 100, 150, 180])
-        for epoch in range(self.nepochs):
+            epochs = self.nepochs // 2
+            milestones = [40, 60, 80]
+        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=milestones)
+        for epoch in range(epochs):
             train_loss, valid_loss = [], []
             model.train()
             for images, _ in trn_loader:
@@ -266,9 +269,9 @@ class Appr(Inc_Learning_Appr):
                     val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
 
-            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            train_loss = sum(train_loss) / len(mem_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            train_acc = train_hits / len(trn_loader.dataset)
+            train_acc = train_hits / len(mem_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
