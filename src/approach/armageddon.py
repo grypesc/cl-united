@@ -172,10 +172,9 @@ class Appr(Inc_Learning_Appr):
         print(f'Cortex has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         model.to(self.device)
         old_model.to(self.device)
+
         if len(self.membeddings) > 0:
             mem_loader = torch.utils.data.DataLoader(self.membeddings, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
-            mem_loader_iter = iter(mem_loader)
-
         optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 100, 150, 180])
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
@@ -189,8 +188,8 @@ class Appr(Inc_Learning_Appr):
                 loss = nn.functional.mse_loss(reconstructed, images)
 
                 if len(self.membeddings) > 0:
-                    membeddings = next(mem_loader_iter)[0].to(self.device)
                     mem_loader_iter = iter(mem_loader)
+                    membeddings = next(mem_loader_iter)[0].to(self.device)
                     with torch.no_grad():
                         mem_target = old_model.decoder(membeddings)[1]
                     _, _, mem_reconstructed = model(mem_target)
@@ -212,8 +211,8 @@ class Appr(Inc_Learning_Appr):
                     loss = nn.functional.mse_loss(reconstructed, images)
 
                     if len(self.membeddings) > 0:
-                        membeddings = next(mem_loader_iter)[0].to(self.device)
                         mem_loader_iter = iter(mem_loader)
+                        membeddings = next(mem_loader_iter)[0].to(self.device)
                         mem_target = old_model.decoder(membeddings)[1]
                         _, _, mem_reconstructed = model(mem_target)
                         mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_target)
@@ -259,7 +258,6 @@ class Appr(Inc_Learning_Appr):
             model.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
-                    targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device), targets.to(self.device)
                     _, feature_maps, _ = self.slow_learner(images, decode=True)
