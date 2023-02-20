@@ -248,8 +248,8 @@ class Appr(Inc_Learning_Appr):
                 membeddings, targets = membeddings.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
                 with torch.no_grad():
-                    feature_maps = self.slow_learner.decoder(membeddings)[0]
-                out = model(feature_maps)
+                    reconstructed = self.slow_learner.decoder(membeddings)[1]
+                out = model(reconstructed)
                 loss = self.criterion(out, targets)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
@@ -263,8 +263,8 @@ class Appr(Inc_Learning_Appr):
                 for images, targets in val_loader:
                     bsz = images.shape[0]
                     images, targets = images.to(self.device), targets.to(self.device)
-                    _, feature_maps, _ = self.slow_learner(images, decode=True)
-                    out = model(feature_maps)
+                    _, _, reconstructed = self.slow_learner(images, decode=True)
+                    out = model(reconstructed)
                     loss = self.criterion(out, targets)
                     val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
@@ -308,8 +308,8 @@ class Appr(Inc_Learning_Appr):
         for images, targets in val_loader:
             targets = targets.to(self.device)
             # Forward current model
-            _, feature_maps, _ = self.slow_learner(images.to(self.device), decode=True)
-            logits = self.fast_learner(feature_maps)
+            _, _, reconstructed = self.slow_learner(images.to(self.device), decode=True)
+            logits = self.fast_learner(reconstructed)
             preds = torch.argmax(logits, dim=1)
             hits_tag = preds == targets
             preds = torch.argmax(logits[:, self.task_offset[t]:self.task_offset[t+1]], dim=1) + self.task_offset[t]
