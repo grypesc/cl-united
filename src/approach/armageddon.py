@@ -150,28 +150,28 @@ class Appr(Inc_Learning_Appr):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
         parser.add_argument('--membeddings',
-                            help='number of embeddings per class',
+                            help='number of memory embeddings per class',
                             type=int,
                             default=100)
 
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
+        old_slow_learner = copy.deepcopy(self.slow_learner)
         print(f"Training slow learner on task {t}")
-        self.train_slow_learner(t, trn_loader, val_loader)
+        self.train_slow_learner(old_slow_learner, trn_loader, val_loader)
         # state_dict = torch.load("slow_learner_10.pth")
         # self.slow_learner.load_state_dict(state_dict, strict=True)
-        self.store_membeddings(t, trn_loader, val_loader.dataset.transform)
+        self.store_membeddings(t, trn_loader, val_loader.dataset.transform, old_slow_learner)
         print(f"Training classifier")
         self.train_fast_learner(t, trn_loader, val_loader)
 
-    def train_slow_learner(self, t, trn_loader, val_loader):
-        model = self.slow_learner
-        old_model = copy.deepcopy(self.slow_learner)
+    def train_slow_learner(self, old_model, trn_loader, val_loader):
         old_model.eval()
-        print(f'Cortex has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-        model.to(self.device)
         old_model.to(self.device)
+        model = self.slow_learner
+        model.to(self.device)
+        print(f'Slow learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         epochs = self.nepochs
         milestones = [50, 100, 150]
         if len(self.membeddings) > 0:
@@ -279,7 +279,23 @@ class Appr(Inc_Learning_Appr):
         self.fast_learner = model
 
     @torch.no_grad()
-    def store_membeddings(self, t, trn_loader, transforms):
+    def store_membeddings(self, t, trn_loader, transforms, old_slow_learner):
+        old_slow_learner.eval()
+        self.slow_learner.eval()
+
+        # Update old membeddings
+        if len(self.membeddings) > 0:
+            mem_loader = torch.utils.data.DataLoader(self.membeddings, batch_size=trn_loader.batch_size, num_workers=0, shuffle=False)
+            index = 0
+            for old_membeddings, _ in mem_loader:
+                bsz = old_membeddings.shape[0]
+                old_membeddings = old_membeddings.to(self.device)
+                _, reconstructed = old_slow_learner.decoder(old_membeddings)
+                new_membeddings = self.slow_learner(reconstructed, decode=False)
+                self.membeddings.data[index:index+bsz] = new_membeddings.cpu()
+                index += bsz
+
+        # Add new membeddings to memory
         labels = np.array(trn_loader.dataset.labels)
         classes_ = set(trn_loader.dataset.labels)
         self.task_offset += [len(classes_) + self.task_offset[t]]
