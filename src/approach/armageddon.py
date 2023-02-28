@@ -249,7 +249,7 @@ class Appr(Inc_Learning_Appr):
         print(f'Classifier has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
 
         self.slow_learner.eval()
-        self.mem_dataset.set_transforms(val_loader.dataset.transform)
+        self.mem_dataset.set_transforms(trn_loader.dataset.transform)
         mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
         optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 100, 150])
         for epoch in range(self.nepochs):
