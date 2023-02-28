@@ -11,7 +11,7 @@ from torch import nn
 from PIL import Image
 
 from .incremental_learning import Inc_Learning_Appr
-from src.networks.resnet32 import resnet32
+from src.networks.resnet32 import resnet20
 from .mvgb import ClassDirectoryDataset, ClassMemoryDataset
 from torchvision.transforms import ToPILImage, Compose
 
@@ -159,7 +159,7 @@ class Appr(Inc_Learning_Appr):
 
         self.slow_learner = SlowLearner(512)
         self.slow_learner.to(device)
-        self.fast_learner = resnet32()
+        self.fast_learner = resnet20()
         self.criterion = torch.nn.CrossEntropyLoss()
 
     @staticmethod
