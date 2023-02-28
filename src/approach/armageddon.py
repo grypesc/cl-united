@@ -1,4 +1,5 @@
 import copy
+import os
 import random
 from itertools import compress
 
@@ -7,30 +8,48 @@ import torch
 
 from argparse import ArgumentParser
 from torch import nn
+from PIL import Image
 
 from .incremental_learning import Inc_Learning_Appr
 from src.networks.resnet32 import resnet32
 from .mvgb import ClassDirectoryDataset, ClassMemoryDataset
+from torchvision.transforms import ToPILImage, Compose
 
 torch.backends.cuda.matmul.allow_tf32 = False
+
+
+def batch_to_numpy_images(images_batch):
+    images = images_batch.cpu().permute(0, 2, 3, 1)
+    mean = torch.tensor([0.5071, 0.4866, 0.4409]).unsqueeze(0).unsqueeze(0)
+    std = torch.tensor([0.2009, 0.1984, 0.2023]).unsqueeze(0).unsqueeze(0)
+    return np.array(torch.clip(255 * (images * std + mean), min=0, max=255), dtype=np.uint8)
 
 
 class MembeddingDataset(torch.utils.data.Dataset):
     def __init__(self, membeddings_per_class: int):
         self.labels = torch.zeros((0,), dtype=torch.int64)
-        self.data = torch.zeros((0, 512), dtype=torch.float)
+        self.images = np.zeros((0, 32, 32, 3), dtype=np.uint8)
+        self.membeddings = torch.zeros((0, 512), dtype=torch.float)
         self.membeddings_per_class = membeddings_per_class
+        self.transforms = None
 
     def __len__(self):
-        return self.data.shape[0]
+        return self.membeddings.shape[0]
 
     def __getitem__(self, index):
-        return self.data[index], self.labels[index]
+        image = self.transforms(self.images[index])
+        return image, self.labels[index]
 
-    def add(self, label, new_data):
-        new_labels = label.expand(new_data.shape[0])
+    def set_transforms(self, transforms):
+        self.transforms = Compose((ToPILImage(), transforms))
+
+    def add(self, label, new_membeddings, new_images):
+        new_labels = label.expand(new_membeddings.shape[0])
         self.labels = torch.cat((self.labels, new_labels), dim=0)
-        self.data = torch.cat((self.data, new_data), dim=0)
+        self.membeddings = torch.cat((self.membeddings, new_membeddings), dim=0)
+
+        images = batch_to_numpy_images(new_images)
+        self.images = np.concatenate((self.images, images), axis=0)
 
 
 class SlowLearner(nn.Module):
@@ -96,8 +115,7 @@ class SlowLearner(nn.Module):
         feature_maps, x = self.decoder(x)
         return z, feature_maps, x
 
-    def visualize(self, out, target):
-        from PIL import Image
+    def visualize(self, out, target, prefix=""):
         out, target = out[0].cpu(), target[0].cpu()
         out = out.permute(1, 2, 0)
         target = target.permute(1, 2, 0)
@@ -107,9 +125,8 @@ class SlowLearner(nn.Module):
         target = torch.clip(255 * (target * std + mean), min=0, max=255)
         out = Image.fromarray(np.array(out, dtype=np.uint8))
         target = Image.fromarray(np.array(target, dtype=np.uint8))
-        out.save("a_out.png")
-        target.save("a_gt.png")
-        # target.save("a_gt.png")
+        out.save(f"{prefix}_out.png")
+        target.save(f"{prefix}_gt.png")
 
 
 class MLP(nn.Module):
@@ -138,7 +155,7 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.model = None
         self.membeddings_per_class = membeddings
-        self.membeddings = MembeddingDataset(self.membeddings_per_class)
+        self.mem_dataset = MembeddingDataset(self.membeddings_per_class)
 
         self.slow_learner = SlowLearner(512)
         self.slow_learner.to(device)
@@ -157,25 +174,24 @@ class Appr(Inc_Learning_Appr):
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
-        old_slow_learner = copy.deepcopy(self.slow_learner)
         print(f"Training slow learner on task {t}")
-        self.train_slow_learner(old_slow_learner, trn_loader, val_loader)
+        self.train_slow_learner(trn_loader, val_loader)
         # state_dict = torch.load("slow_learner_10.pth")
         # self.slow_learner.load_state_dict(state_dict, strict=True)
-        self.store_membeddings(t, trn_loader, val_loader.dataset.transform, old_slow_learner)
-        print(f"Training classifier")
+        self.store_membeddings(t, trn_loader, val_loader.dataset.transform)
+        print(f"Training fast learner after task {t}")
         self.train_fast_learner(t, trn_loader, val_loader)
 
-    def train_slow_learner(self, old_model, trn_loader, val_loader):
-        old_model.eval()
-        old_model.to(self.device)
+    def train_slow_learner(self, trn_loader, val_loader):
+
         model = self.slow_learner
         model.to(self.device)
         print(f'Slow learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         epochs = self.nepochs
         milestones = [50, 100, 150]
-        if len(self.membeddings) > 0:
-            mem_loader = torch.utils.data.DataLoader(self.membeddings, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+        if len(self.mem_dataset) > 0:
+            self.mem_dataset.set_transforms(trn_loader.dataset.transform)
+            mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.nepochs // 2
             milestones = [40, 60, 80]
         optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=milestones)
@@ -183,20 +199,17 @@ class Appr(Inc_Learning_Appr):
             train_loss, valid_loss = [], []
             model.train()
             for images, _ in trn_loader:
-
                 bsz = images.shape[0]
                 images = images.to(self.device)
                 optimizer.zero_grad()
                 _, _, reconstructed = model(images)
                 loss = nn.functional.mse_loss(reconstructed, images)
 
-                if len(self.membeddings) > 0:
+                if len(self.mem_dataset) > 0:
                     mem_loader_iter = iter(mem_loader)
-                    membeddings = next(mem_loader_iter)[0].to(self.device)
-                    with torch.no_grad():
-                        mem_target = old_model.decoder(membeddings)[1]
-                    _, _, mem_reconstructed = model(mem_target)
-                    mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_target)
+                    mem_images = next(mem_loader_iter)[0].to(self.device)
+                    _, _, mem_reconstructed = model(mem_images)
+                    mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
                     loss = loss + mem_loss
 
                 loss.backward()
@@ -213,12 +226,11 @@ class Appr(Inc_Learning_Appr):
                     z, _, reconstructed = model(images)
                     loss = nn.functional.mse_loss(reconstructed, images)
 
-                    if len(self.membeddings) > 0:
+                    if len(self.mem_dataset) > 0:
                         mem_loader_iter = iter(mem_loader)
-                        membeddings = next(mem_loader_iter)[0].to(self.device)
-                        mem_target = old_model.decoder(membeddings)[1]
-                        _, _, mem_reconstructed = model(mem_target)
-                        mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_target)
+                        mem_images = next(mem_loader_iter)[0].to(self.device)
+                        _, _, mem_reconstructed = model(mem_images)
+                        mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
                         loss = loss + mem_loss
 
                     valid_loss.append(float(bsz * loss))
@@ -237,18 +249,17 @@ class Appr(Inc_Learning_Appr):
         print(f'Classifier has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
 
         self.slow_learner.eval()
-        mem_loader = torch.utils.data.DataLoader(self.membeddings, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+        self.mem_dataset.set_transforms(val_loader.dataset.transform)
+        mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
         optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 100, 150])
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             model.train()
-            for membeddings, targets in mem_loader:
-                bsz = membeddings.shape[0]
-                membeddings, targets = membeddings.to(self.device), targets.to(self.device)
+            for reconstructed, targets in mem_loader:
+                bsz = reconstructed.shape[0]
+                reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
-                with torch.no_grad():
-                    reconstructed = self.slow_learner.decoder(membeddings)[1]
                 out = model(reconstructed)
                 loss = self.criterion(out, targets)
                 loss.backward()
@@ -260,10 +271,9 @@ class Appr(Inc_Learning_Appr):
 
             model.eval()
             with torch.no_grad():
-                for images, targets in val_loader:
-                    bsz = images.shape[0]
-                    images, targets = images.to(self.device), targets.to(self.device)
-                    _, _, reconstructed = self.slow_learner(images, decode=True)
+                for reconstructed, targets in val_loader:
+                    bsz = reconstructed.shape[0]
+                    reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
                     out = model(reconstructed)
                     loss = self.criterion(out, targets)
                     val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
@@ -279,20 +289,20 @@ class Appr(Inc_Learning_Appr):
         self.fast_learner = model
 
     @torch.no_grad()
-    def store_membeddings(self, t, trn_loader, transforms, old_slow_learner):
-        old_slow_learner.eval()
+    def store_membeddings(self, t, trn_loader, transforms):
         self.slow_learner.eval()
+        self.mem_dataset.set_transforms(transforms)
 
         # Update old membeddings
-        if len(self.membeddings) > 0:
-            mem_loader = torch.utils.data.DataLoader(self.membeddings, batch_size=trn_loader.batch_size, num_workers=0, shuffle=False)
+        if len(self.mem_dataset) > 0:
+            mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=0, shuffle=False)
             index = 0
-            for old_membeddings, _ in mem_loader:
-                bsz = old_membeddings.shape[0]
-                old_membeddings = old_membeddings.to(self.device)
-                _, reconstructed = old_slow_learner.decoder(old_membeddings)
-                new_membeddings = self.slow_learner(reconstructed, decode=False)
-                self.membeddings.data[index:index+bsz] = new_membeddings.cpu()
+            for old_reconstructed, _ in mem_loader:
+                bsz = old_reconstructed.shape[0]
+                old_reconstructed = old_reconstructed.to(self.device)
+                new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
+                self.mem_dataset.membeddings[index:index+bsz] = new_membeddings.cpu()
+                self.mem_dataset.images[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
                 index += bsz
 
         # Add new membeddings to memory
@@ -311,9 +321,9 @@ class Appr(Inc_Learning_Appr):
             loader = torch.utils.data.DataLoader(ds, batch_size=self.membeddings_per_class, num_workers=0, shuffle=True)
             for images in loader:
                 images = images.to(self.device)
-                membeddings = self.slow_learner(images, decode=False)
-                membeddings = membeddings.cpu()
-                self.membeddings.add(torch.tensor(i), membeddings)
+                membeddings, _, reconstructed = self.slow_learner(images, decode=True)
+                membeddings, reconstructed = membeddings.cpu(), reconstructed.cpu()
+                self.mem_dataset.add(torch.tensor(i), membeddings, reconstructed)
 
     @torch.no_grad()
     def eval(self, t, val_loader):
@@ -321,10 +331,13 @@ class Appr(Inc_Learning_Appr):
         total_loss, total_acc_taw, total_acc_tag, total_num = 0, 0, 0, 0
         self.slow_learner.eval()
         self.fast_learner.eval()
+        visualizations_dir = f"{self.logger.exp_path}/visualizations_{str(self.logger.begin_time.strftime('%Y-%m-%d_%H:%M:%S'))}/{t}"
+        os.makedirs(visualizations_dir, exist_ok=True)
         for images, targets in val_loader:
             targets = targets.to(self.device)
             # Forward current model
             _, _, reconstructed = self.slow_learner(images.to(self.device), decode=True)
+            self.slow_learner.visualize(reconstructed, images, prefix=f"{visualizations_dir}/{int(targets[0])}")
             logits = self.fast_learner(reconstructed)
             preds = torch.argmax(logits, dim=1)
             hits_tag = preds == targets
