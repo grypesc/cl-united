@@ -16,6 +16,7 @@ from .mvgb import ClassDirectoryDataset, ClassMemoryDataset
 from torchvision.transforms import ToPILImage, Compose
 
 torch.backends.cuda.matmul.allow_tf32 = False
+# export PYTHONPATH=~/facil
 
 
 def batch_to_numpy_images(images_batch):
@@ -28,28 +29,28 @@ def batch_to_numpy_images(images_batch):
 class MembeddingDataset(torch.utils.data.Dataset):
     def __init__(self, membeddings_per_class: int):
         self.labels = torch.zeros((0,), dtype=torch.int64)
-        self.images = np.zeros((0, 32, 32, 3), dtype=np.uint8)
         self.membeddings = torch.zeros((0, 512), dtype=torch.float)
         self.membeddings_per_class = membeddings_per_class
+        self.reconstructed = np.zeros((0, 32, 32, 3), dtype=np.uint8)
         self.transforms = None
 
     def __len__(self):
         return self.membeddings.shape[0]
 
     def __getitem__(self, index):
-        image = self.transforms(self.images[index])
-        return image, self.labels[index]
+        reconstructed = self.transforms(self.reconstructed[index])
+        return reconstructed, self.labels[index]
 
     def set_transforms(self, transforms):
         self.transforms = Compose((ToPILImage(), transforms))
 
-    def add(self, label, new_membeddings, new_images):
+    def add(self, label, new_membeddings, new_reconstructed):
         new_labels = label.expand(new_membeddings.shape[0])
         self.labels = torch.cat((self.labels, new_labels), dim=0)
         self.membeddings = torch.cat((self.membeddings, new_membeddings), dim=0)
 
-        images = batch_to_numpy_images(new_images)
-        self.images = np.concatenate((self.images, images), axis=0)
+        new_reconstructed = batch_to_numpy_images(new_reconstructed)
+        self.reconstructed = np.concatenate((self.reconstructed, new_reconstructed), axis=0)
 
 
 class SlowLearner(nn.Module):
@@ -129,18 +130,18 @@ class SlowLearner(nn.Module):
         target.save(f"{prefix}_gt.png")
 
 
-class MLP(nn.Module):
-    def __init__(self, z_size, hidden_size, out_size):
-        super().__init__()
-        self.linear1 = nn.Linear(z_size, 4 * hidden_size)
-        self.linear2 = nn.Linear(4 * hidden_size, hidden_size)
-        self.out = nn.Linear(hidden_size, out_size)
-        self.activation = nn.LeakyReLU()
-
-    def forward(self, x):
-        x = self.activation(self.linear1(x))
-        x = self.activation(self.linear2(x))
-        return self.out(x)
+# class MLP(nn.Module):
+#     def __init__(self, z_size, hidden_size, out_size):
+#         super().__init__()
+#         self.linear1 = nn.Linear(z_size, 4 * hidden_size)
+#         self.linear2 = nn.Linear(4 * hidden_size, hidden_size)
+#         self.out = nn.Linear(hidden_size, out_size)
+#         self.activation = nn.LeakyReLU()
+#
+#     def forward(self, x):
+#         x = self.activation(self.linear1(x))
+#         x = self.activation(self.linear2(x))
+#         return self.out(x)
 
 
 class Appr(Inc_Learning_Appr):
@@ -148,7 +149,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, fix_bn=False, eval_on_train=False,
-                 logger=None, membeddings=100):
+                 logger=None, membeddings=100, alpha=0.99):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -156,6 +157,7 @@ class Appr(Inc_Learning_Appr):
         self.model = None
         self.membeddings_per_class = membeddings
         self.mem_dataset = MembeddingDataset(self.membeddings_per_class)
+        self.alpha = alpha
 
         self.slow_learner = SlowLearner(512)
         self.slow_learner.to(device)
@@ -170,6 +172,10 @@ class Appr(Inc_Learning_Appr):
                             help='number of memory embeddings per class',
                             type=int,
                             default=100)
+        parser.add_argument('--alpha',
+                            help='weight of membeddings distillation loss',
+                            type=float,
+                            default=0.99)
 
         return parser.parse_known_args(args)
 
@@ -210,7 +216,7 @@ class Appr(Inc_Learning_Appr):
                     mem_images = next(mem_loader_iter)[0].to(self.device)
                     _, _, mem_reconstructed = model(mem_images)
                     mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
-                    loss = loss + mem_loss
+                    loss = (1 - self.alpha) * loss + self.alpha * mem_loss
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
@@ -231,7 +237,7 @@ class Appr(Inc_Learning_Appr):
                         mem_images = next(mem_loader_iter)[0].to(self.device)
                         _, _, mem_reconstructed = model(mem_images)
                         mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
-                        loss = loss + mem_loss
+                        loss = (1 - self.alpha) * loss + self.alpha * mem_loss
 
                     valid_loss.append(float(bsz * loss))
 
@@ -271,9 +277,10 @@ class Appr(Inc_Learning_Appr):
 
             model.eval()
             with torch.no_grad():
-                for reconstructed, targets in val_loader:
-                    bsz = reconstructed.shape[0]
-                    reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
+                for images, targets in val_loader:
+                    bsz = images.shape[0]
+                    images, targets = images.to(self.device), targets.to(self.device)
+                    _, _, reconstructed = self.slow_learner(images)
                     out = model(reconstructed)
                     loss = self.criterion(out, targets)
                     val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
@@ -302,7 +309,7 @@ class Appr(Inc_Learning_Appr):
                 old_reconstructed = old_reconstructed.to(self.device)
                 new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
                 self.mem_dataset.membeddings[index:index+bsz] = new_membeddings.cpu()
-                self.mem_dataset.images[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
+                self.mem_dataset.reconstructed[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
                 index += bsz
 
         # Add new membeddings to memory
@@ -349,14 +356,6 @@ class Appr(Inc_Learning_Appr):
             total_acc_tag += hits_tag.sum().item()
             total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
-
-    @torch.no_grad()
-    def calculate_metrics(self, features, targets, t):
-        """Contains the main Task-Aware and Task-Agnostic metrics"""
-        taw_pred, tag_pred = self.predict_class_bayes(t, features)
-        hits_taw = (taw_pred == targets).float()
-        hits_tag = (tag_pred == targets).float()
-        return hits_taw, hits_tag
 
     def _get_optimizer(self, model, wd, milestones=[60, 120, 160]):
         """Returns the optimizer"""
