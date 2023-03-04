@@ -153,7 +153,8 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, fix_bn=False, eval_on_train=False,
-                 logger=None, membeddings=100, alpha=0.99, slow_epochs=200, fast_epochs=200, slow_lr=1e-3, fast_lr=1e-3):
+                 logger=None, membeddings=100, alpha=0.99, slow_epochs=200, fast_epochs=200, slow_lr=1e-3, fast_lr=1e-3,
+                 freeze_encoder=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -166,6 +167,7 @@ class Appr(Inc_Learning_Appr):
         self.fast_epochs = fast_epochs
         self.slow_lr = slow_lr
         self.fast_lr = fast_lr
+        self.freeze_encoder = freeze_encoder
 
         self.slow_learner = SlowLearner(512)
         self.slow_learner.to(device)
@@ -200,12 +202,17 @@ class Appr(Inc_Learning_Appr):
                             help='learning rate of fast learner',
                             type=float,
                             default=1e-3)
+        parser.add_argument('--freeze-encoder',
+                            help='freeze encoder after first task',
+                            action='store_true',
+                            default=False)
 
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
-        print(f"Training slow learner on task {t}")
-        self.train_slow_learner(trn_loader, val_loader)
+        if not self.freeze_encoder or t == 0:
+            print(f"Training slow learner on task {t}")
+            self.train_slow_learner(trn_loader, val_loader)
         # state_dict = torch.load("slow_learner_10.pth")
         # self.slow_learner.load_state_dict(state_dict, strict=True)
         self.store_membeddings(t, trn_loader, val_loader.dataset.transform)
