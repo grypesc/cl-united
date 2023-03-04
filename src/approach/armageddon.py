@@ -333,16 +333,16 @@ class Appr(Inc_Learning_Appr):
         self.mem_dataset.set_transforms(transforms)
 
         # Update old membeddings
-        if len(self.mem_dataset) > 0:
-            mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=0, shuffle=False)
-            index = 0
-            for old_reconstructed, _ in mem_loader:
-                bsz = old_reconstructed.shape[0]
-                old_reconstructed = old_reconstructed.to(self.device)
-                new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
-                self.mem_dataset.membeddings[index:index+bsz] = new_membeddings.cpu()
-                self.mem_dataset.reconstructed[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
-                index += bsz
+        # if len(self.mem_dataset) > 0:
+        #     mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=0, shuffle=False)
+        #     index = 0
+        #     for old_reconstructed, _ in mem_loader:
+        #         bsz = old_reconstructed.shape[0]
+        #         old_reconstructed = old_reconstructed.to(self.device)
+        #         new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
+        #         self.mem_dataset.membeddings[index:index+bsz] = new_membeddings.cpu()
+        #         self.mem_dataset.reconstructed[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
+        #         index += bsz
 
         # Add new membeddings to memory
         labels = np.array(trn_loader.dataset.labels)
