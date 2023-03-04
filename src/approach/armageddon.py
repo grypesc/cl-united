@@ -32,6 +32,7 @@ class MembeddingDataset(torch.utils.data.Dataset):
         self.membeddings = torch.zeros((0, 512), dtype=torch.float)
         self.membeddings_per_class = membeddings_per_class
         self.reconstructed = np.zeros((0, 32, 32, 3), dtype=np.uint8)
+        self.images = np.zeros((0, 32, 32, 3), dtype=np.uint8)
         self.transforms = None
 
     def __len__(self):
@@ -44,13 +45,16 @@ class MembeddingDataset(torch.utils.data.Dataset):
     def set_transforms(self, transforms):
         self.transforms = Compose((ToPILImage(), transforms))
 
-    def add(self, label, new_membeddings, new_reconstructed):
+    def add(self, label, new_membeddings, new_reconstructed, new_images):
         new_labels = label.expand(new_membeddings.shape[0])
         self.labels = torch.cat((self.labels, new_labels), dim=0)
         self.membeddings = torch.cat((self.membeddings, new_membeddings), dim=0)
 
         new_reconstructed = batch_to_numpy_images(new_reconstructed)
         self.reconstructed = np.concatenate((self.reconstructed, new_reconstructed), axis=0)
+
+        new_images = batch_to_numpy_images(new_images)
+        self.images = np.concatenate((self.images, new_images), axis=0)
 
 
 class SlowLearner(nn.Module):
@@ -149,7 +153,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, fix_bn=False, eval_on_train=False,
-                 logger=None, membeddings=100, alpha=0.99):
+                 logger=None, membeddings=100, alpha=0.99, slow_epochs=200, fast_epochs=200, slow_lr=1e-3, fast_lr=1e-3):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -158,6 +162,10 @@ class Appr(Inc_Learning_Appr):
         self.membeddings_per_class = membeddings
         self.mem_dataset = MembeddingDataset(self.membeddings_per_class)
         self.alpha = alpha
+        self.slow_epochs = slow_epochs
+        self.fast_epochs = fast_epochs
+        self.slow_lr = slow_lr
+        self.fast_lr = fast_lr
 
         self.slow_learner = SlowLearner(512)
         self.slow_learner.to(device)
@@ -176,6 +184,22 @@ class Appr(Inc_Learning_Appr):
                             help='weight of membeddings distillation loss',
                             type=float,
                             default=0.99)
+        parser.add_argument('--slow-epochs',
+                            help='epochs of slow learner',
+                            type=int,
+                            default=200)
+        parser.add_argument('--fast-epochs',
+                            help='epochs of fast learner',
+                            type=int,
+                            default=200)
+        parser.add_argument('--slow-lr',
+                            help='learning rate of slow learner',
+                            type=float,
+                            default=1e-3)
+        parser.add_argument('--fast-lr',
+                            help='learning rate of fast learner',
+                            type=float,
+                            default=1e-3)
 
         return parser.parse_known_args(args)
 
@@ -187,20 +211,21 @@ class Appr(Inc_Learning_Appr):
         self.store_membeddings(t, trn_loader, val_loader.dataset.transform)
         print(f"Training fast learner after task {t}")
         self.train_fast_learner(t, trn_loader, val_loader)
+        self.dump_visualizations(t)
 
     def train_slow_learner(self, trn_loader, val_loader):
 
         model = self.slow_learner
         model.to(self.device)
         print(f'Slow learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-        epochs = self.nepochs
+        epochs = self.slow_epochs
         milestones = [50, 100, 150]
         if len(self.mem_dataset) > 0:
             self.mem_dataset.set_transforms(trn_loader.dataset.transform)
-            mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
-            epochs = self.nepochs // 2
+            # mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+            epochs = self.slow_epochs // 2
             milestones = [40, 60, 80]
-        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=milestones)
+        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, self.slow_lr, milestones=milestones)
         for epoch in range(epochs):
             train_loss, valid_loss = [], []
             model.train()
@@ -211,12 +236,12 @@ class Appr(Inc_Learning_Appr):
                 _, _, reconstructed = model(images)
                 loss = nn.functional.mse_loss(reconstructed, images)
 
-                if len(self.mem_dataset) > 0:
-                    mem_loader_iter = iter(mem_loader)
-                    mem_images = next(mem_loader_iter)[0].to(self.device)
-                    _, _, mem_reconstructed = model(mem_images)
-                    mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
-                    loss = (1 - self.alpha) * loss + self.alpha * mem_loss
+                # if len(self.mem_dataset) > 0:
+                #     mem_loader_iter = iter(mem_loader)
+                #     mem_images = next(mem_loader_iter)[0].to(self.device)
+                #     _, _, mem_reconstructed = model(mem_images)
+                #     mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
+                #     loss = (1 - self.alpha) * loss + self.alpha * mem_loss
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
@@ -232,12 +257,12 @@ class Appr(Inc_Learning_Appr):
                     z, _, reconstructed = model(images)
                     loss = nn.functional.mse_loss(reconstructed, images)
 
-                    if len(self.mem_dataset) > 0:
-                        mem_loader_iter = iter(mem_loader)
-                        mem_images = next(mem_loader_iter)[0].to(self.device)
-                        _, _, mem_reconstructed = model(mem_images)
-                        mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
-                        loss = (1 - self.alpha) * loss + self.alpha * mem_loss
+                    # if len(self.mem_dataset) > 0:
+                    #     mem_loader_iter = iter(mem_loader)
+                    #     mem_images = next(mem_loader_iter)[0].to(self.device)
+                    #     _, _, mem_reconstructed = model(mem_images)
+                    #     mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
+                    #     loss = (1 - self.alpha) * loss + self.alpha * mem_loss
 
                     valid_loss.append(float(bsz * loss))
 
@@ -257,8 +282,8 @@ class Appr(Inc_Learning_Appr):
         self.slow_learner.eval()
         self.mem_dataset.set_transforms(trn_loader.dataset.transform)
         mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
-        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, milestones=[50, 100, 150])
-        for epoch in range(self.nepochs):
+        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, self.fast_lr, milestones=[50, 100, 150])
+        for epoch in range(self.fast_epochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             model.train()
@@ -330,7 +355,20 @@ class Appr(Inc_Learning_Appr):
                 images = images.to(self.device)
                 membeddings, _, reconstructed = self.slow_learner(images, decode=True)
                 membeddings, reconstructed = membeddings.cpu(), reconstructed.cpu()
-                self.mem_dataset.add(torch.tensor(i), membeddings, reconstructed)
+                self.mem_dataset.add(torch.tensor(i), membeddings, reconstructed, images.cpu())
+
+    def dump_visualizations(self, t):
+        visualizations_dir = f"{self.logger.exp_path}/visualizations_{str(self.logger.begin_time.strftime('%Y-%m-%d_%H:%M:%S'))}/{t}"
+        os.makedirs(visualizations_dir, exist_ok=True)
+        classes = np.unique(self.mem_dataset.labels)
+        for c in classes:
+            index = np.argmax(self.mem_dataset.labels == c)
+            reconstructed = self.mem_dataset.reconstructed[index]
+            reconstructed = Image.fromarray(reconstructed)
+            reconstructed.save(f"{visualizations_dir}/{c}_membedding.png")
+            image = self.mem_dataset.images[index]
+            image = Image.fromarray(image)
+            image.save(f"{visualizations_dir}/{c}_image.png")
 
     @torch.no_grad()
     def eval(self, t, val_loader):
@@ -338,13 +376,10 @@ class Appr(Inc_Learning_Appr):
         total_loss, total_acc_taw, total_acc_tag, total_num = 0, 0, 0, 0
         self.slow_learner.eval()
         self.fast_learner.eval()
-        visualizations_dir = f"{self.logger.exp_path}/visualizations_{str(self.logger.begin_time.strftime('%Y-%m-%d_%H:%M:%S'))}/{t}"
-        os.makedirs(visualizations_dir, exist_ok=True)
         for images, targets in val_loader:
             targets = targets.to(self.device)
             # Forward current model
             _, _, reconstructed = self.slow_learner(images.to(self.device), decode=True)
-            self.slow_learner.visualize(reconstructed, images, prefix=f"{visualizations_dir}/{int(targets[0])}")
             logits = self.fast_learner(reconstructed)
             preds = torch.argmax(logits, dim=1)
             hits_tag = preds == targets
@@ -357,8 +392,8 @@ class Appr(Inc_Learning_Appr):
             total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
-    def _get_optimizer(self, model, wd, milestones=[60, 120, 160]):
+    def _get_optimizer(self, model, wd, lr, milestones=[60, 120, 160]):
         """Returns the optimizer"""
-        optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=wd)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
