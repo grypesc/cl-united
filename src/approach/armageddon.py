@@ -161,7 +161,9 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.model = None
         self.membeddings_per_class = membeddings
-        self.mem_dataset = MembeddingDataset(self.membeddings_per_class)
+        self.membeddings_per_class_val = 100
+        self.mem_train_dataset = MembeddingDataset(self.membeddings_per_class)
+        self.mem_valid_dataset = MembeddingDataset(self.membeddings_per_class_val)
         self.alpha = alpha
         self.slow_epochs = slow_epochs
         self.fast_epochs = fast_epochs
@@ -215,7 +217,7 @@ class Appr(Inc_Learning_Appr):
             self.train_slow_learner(trn_loader, val_loader)
         # state_dict = torch.load("slow_learner_10.pth")
         # self.slow_learner.load_state_dict(state_dict, strict=True)
-        self.store_membeddings(t, trn_loader, val_loader.dataset.transform)
+        self.store_membeddings(t, trn_loader, val_loader, val_loader.dataset.transform)
         print(f"Training fast learner after task {t}")
         self.train_fast_learner(t, trn_loader, val_loader)
         self.dump_visualizations(t)
@@ -227,8 +229,8 @@ class Appr(Inc_Learning_Appr):
         print(f'Slow learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         epochs = self.slow_epochs
         milestones = [50, 100, 150]
-        if len(self.mem_dataset) > 0:
-            self.mem_dataset.set_transforms(trn_loader.dataset.transform)
+        if len(self.mem_train_dataset) > 0:
+            # self.mem_dataset.set_transforms(trn_loader.dataset.transform)
             # mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.slow_epochs // 2
             milestones = [40, 60, 80]
@@ -287,14 +289,17 @@ class Appr(Inc_Learning_Appr):
         print(f'Classifier has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
 
         self.slow_learner.eval()
-        self.mem_dataset.set_transforms(trn_loader.dataset.transform)
-        mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+        self.mem_train_dataset.set_transforms(trn_loader.dataset.transform)
+        self.mem_valid_dataset.set_transforms(val_loader.dataset.transform)
+        mem_train_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+        mem_val_loader = torch.utils.data.DataLoader(self.mem_valid_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+
         optimizer, lr_scheduler = self._get_optimizer(model, self.wd, self.fast_lr, milestones=[50, 100, 150])
         for epoch in range(self.fast_epochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             model.train()
-            for reconstructed, targets in mem_loader:
+            for reconstructed, targets in mem_train_loader:
                 bsz = reconstructed.shape[0]
                 reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
@@ -309,28 +314,28 @@ class Appr(Inc_Learning_Appr):
 
             model.eval()
             with torch.no_grad():
-                for images, targets in val_loader:
-                    bsz = images.shape[0]
-                    images, targets = images.to(self.device), targets.to(self.device)
-                    _, _, reconstructed = self.slow_learner(images)
+                for reconstructed, targets in mem_val_loader:
+                    bsz = reconstructed.shape[0]
+                    reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
                     out = model(reconstructed)
                     loss = self.criterion(out, targets)
                     val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
 
-            train_loss = sum(train_loss) / len(mem_loader.dataset)
-            valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            train_acc = train_hits / len(mem_loader.dataset)
-            val_acc = val_hits / len(val_loader.dataset)
+            train_loss = sum(train_loss) / len(mem_train_loader.dataset)
+            valid_loss = sum(valid_loss) / len(mem_val_loader.dataset)
+            train_acc = train_hits / len(mem_train_loader.dataset)
+            val_acc = val_hits / len(mem_val_loader.dataset)
 
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
         self.fast_learner = model
 
     @torch.no_grad()
-    def store_membeddings(self, t, trn_loader, transforms):
+    def store_membeddings(self, t, trn_loader, val_loader, transforms):
         self.slow_learner.eval()
-        self.mem_dataset.set_transforms(transforms)
+        self.mem_train_dataset.set_transforms(transforms)
+        self.mem_valid_dataset.set_transforms(transforms)
 
         # Update old membeddings
         # if len(self.mem_dataset) > 0:
@@ -344,36 +349,43 @@ class Appr(Inc_Learning_Appr):
         #         self.mem_dataset.reconstructed[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
         #         index += bsz
 
-        # Add new membeddings to memory
-        labels = np.array(trn_loader.dataset.labels)
         classes_ = set(trn_loader.dataset.labels)
         self.task_offset += [len(classes_) + self.task_offset[t]]
+
+        # Add new train membeddings to memory
+        self.add_membeddings_to_reservoir(self.mem_train_dataset, trn_loader.dataset, t, transforms, self.membeddings_per_class)
+        self.add_membeddings_to_reservoir(self.mem_valid_dataset, val_loader.dataset, t, transforms, self.membeddings_per_class_val)
+
+    @torch.no_grad()
+    def add_membeddings_to_reservoir(self, mem_dataset, src_dataset, t, transforms, num_to_store):
+        labels = np.array(src_dataset.labels)
+        classes_ = set(src_dataset.labels)
         for i in classes_:
             class_indices = labels == i
-            if isinstance(trn_loader.dataset.images, list):
-                train_images = list(compress(trn_loader.dataset.images, class_indices))
-                train_images = train_images[:self.membeddings_per_class]
+            if isinstance(src_dataset.images, list):
+                train_images = list(compress(src_dataset.images, class_indices))
+                train_images = train_images[:num_to_store]
                 ds = ClassDirectoryDataset(train_images, transforms)
             else:
-                ds = trn_loader.dataset.images[class_indices][:self.membeddings_per_class]
+                ds = src_dataset.images[class_indices][:num_to_store]
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=self.membeddings_per_class, num_workers=0, shuffle=True)
             for images in loader:
                 images = images.to(self.device)
                 membeddings, _, reconstructed = self.slow_learner(images, decode=True)
                 membeddings, reconstructed = membeddings.cpu(), reconstructed.cpu()
-                self.mem_dataset.add(torch.tensor(i), membeddings, reconstructed, images.cpu())
+                mem_dataset.add(torch.tensor(i), membeddings, reconstructed, images.cpu())
 
     def dump_visualizations(self, t):
         visualizations_dir = f"{self.logger.exp_path}/visualizations_{str(self.logger.begin_time.strftime('%Y-%m-%d_%H:%M:%S'))}/{t}"
         os.makedirs(visualizations_dir, exist_ok=True)
-        classes = np.unique(self.mem_dataset.labels)
+        classes = np.unique(self.mem_valid_dataset.labels)
         for c in classes:
-            index = np.argmax(self.mem_dataset.labels == c)
-            reconstructed = self.mem_dataset.reconstructed[index]
+            index = np.argmax(self.mem_valid_dataset.labels == c)
+            reconstructed = self.mem_valid_dataset.reconstructed[index]
             reconstructed = Image.fromarray(reconstructed)
             reconstructed.save(f"{visualizations_dir}/{c}_membedding.png")
-            image = self.mem_dataset.images[index]
+            image = self.mem_valid_dataset.images[index]
             image = Image.fromarray(image)
             image.save(f"{visualizations_dir}/{c}_image.png")
 
