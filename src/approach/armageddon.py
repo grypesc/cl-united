@@ -11,7 +11,7 @@ from torch import nn
 from PIL import Image
 
 from .incremental_learning import Inc_Learning_Appr
-from src.networks.resnet32 import resnet20
+from src.networks.resnet32 import resnet20, resnet32
 from .mvgb import ClassDirectoryDataset, ClassMemoryDataset
 from torchvision.transforms import ToPILImage, Compose
 
@@ -153,8 +153,8 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, fix_bn=False, eval_on_train=False,
-                 logger=None, membeddings=100, alpha=0.99, slow_epochs=200, fast_epochs=200, slow_lr=1e-3, fast_lr=1e-3,
-                 freeze_encoder=False):
+                 logger=None, membeddings=100, slow_epochs=200, fast_epochs=200, slow_lr=1e-3, fast_lr=1e-3,
+                 freeze_encoder=False, adapt_membeddings=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -164,16 +164,16 @@ class Appr(Inc_Learning_Appr):
         self.membeddings_per_class_val = 100
         self.mem_train_dataset = MembeddingDataset(self.membeddings_per_class)
         self.mem_valid_dataset = MembeddingDataset(self.membeddings_per_class_val)
-        self.alpha = alpha
         self.slow_epochs = slow_epochs
         self.fast_epochs = fast_epochs
         self.slow_lr = slow_lr
         self.fast_lr = fast_lr
         self.freeze_encoder = freeze_encoder
+        self.adapt_membeddings = adapt_membeddings
 
         self.slow_learner = SlowLearner(512)
         self.slow_learner.to(device)
-        self.fast_learner = resnet20()
+        self.fast_learner = resnet32()
         self.criterion = torch.nn.CrossEntropyLoss()
 
     @staticmethod
@@ -184,10 +184,6 @@ class Appr(Inc_Learning_Appr):
                             help='number of memory embeddings per class',
                             type=int,
                             default=100)
-        parser.add_argument('--alpha',
-                            help='weight of membeddings distillation loss',
-                            type=float,
-                            default=0.99)
         parser.add_argument('--slow-epochs',
                             help='epochs of slow learner',
                             type=int,
@@ -203,9 +199,13 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--fast-lr',
                             help='learning rate of fast learner',
                             type=float,
-                            default=1e-3)
+                            default=1e-1)
         parser.add_argument('--freeze-encoder',
                             help='freeze encoder after first task',
+                            action='store_true',
+                            default=False)
+        parser.add_argument('--adapt-membeddings',
+                            help='use MLP to update membeddings in memory using features adaptation',
                             action='store_true',
                             default=False)
 
@@ -234,7 +234,7 @@ class Appr(Inc_Learning_Appr):
             # mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.slow_epochs // 2
             milestones = [40, 60, 80]
-        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, self.slow_lr, milestones=milestones)
+        optimizer, lr_scheduler = self._get_slow_optimizer(model, self.wd, milestones=milestones)
         for epoch in range(epochs):
             train_loss, valid_loss = [], []
             model.train()
@@ -294,7 +294,7 @@ class Appr(Inc_Learning_Appr):
         mem_train_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
         mem_val_loader = torch.utils.data.DataLoader(self.mem_valid_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
 
-        optimizer, lr_scheduler = self._get_optimizer(model, self.wd, self.fast_lr, milestones=[50, 100, 150])
+        optimizer, lr_scheduler = self._get_fast_optimizer(model, self.wd, milestones=[50, 100, 150])
         for epoch in range(self.fast_epochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
@@ -411,8 +411,14 @@ class Appr(Inc_Learning_Appr):
             total_num += len(targets)
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
-    def _get_optimizer(self, model, wd, lr, milestones=[60, 120, 160]):
+    def _get_slow_optimizer(self, model, wd, milestones=[60, 120, 160]):
         """Returns the optimizer"""
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.slow_lr, weight_decay=wd)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
+        return optimizer, scheduler
+
+    def _get_fast_optimizer(self, model, wd, milestones=[60, 120, 160]):
+        """Returns the optimizer"""
+        optimizer = torch.optim.SGD(model.parameters(), lr=self.fast_lr, weight_decay=wd, momentum=self.momentum)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
