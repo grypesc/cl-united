@@ -40,7 +40,7 @@ class MembeddingDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         reconstructed = self.transforms(self.reconstructed[index])
-        return reconstructed, self.labels[index]
+        return self.membeddings[index], reconstructed, self.labels[index]
 
     def set_transforms(self, transforms):
         self.transforms = Compose((ToPILImage(), transforms))
@@ -299,7 +299,7 @@ class Appr(Inc_Learning_Appr):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             model.train()
-            for reconstructed, targets in mem_train_loader:
+            for _, reconstructed, targets in mem_train_loader:
                 bsz = reconstructed.shape[0]
                 reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
@@ -314,7 +314,7 @@ class Appr(Inc_Learning_Appr):
 
             model.eval()
             with torch.no_grad():
-                for reconstructed, targets in mem_val_loader:
+                for _, reconstructed, targets in mem_val_loader:
                     bsz = reconstructed.shape[0]
                     reconstructed, targets = reconstructed.to(self.device), targets.to(self.device)
                     out = model(reconstructed)
@@ -337,17 +337,10 @@ class Appr(Inc_Learning_Appr):
         self.mem_train_dataset.set_transforms(transforms)
         self.mem_valid_dataset.set_transforms(transforms)
 
-        # Update old membeddings
-        # if len(self.mem_dataset) > 0:
-        #     mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=0, shuffle=False)
-        #     index = 0
-        #     for old_reconstructed, _ in mem_loader:
-        #         bsz = old_reconstructed.shape[0]
-        #         old_reconstructed = old_reconstructed.to(self.device)
-        #         new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
-        #         self.mem_dataset.membeddings[index:index+bsz] = new_membeddings.cpu()
-        #         self.mem_dataset.reconstructed[index:index+bsz] = batch_to_numpy_images(new_reconstructed.cpu())
-        #         index += bsz
+        # Update old reconstruction
+        if len(self.mem_train_dataset) > 0:
+            self.update_memory(self.mem_train_dataset)
+            self.update_memory(self.mem_valid_dataset)
 
         classes_ = set(trn_loader.dataset.labels)
         self.task_offset += [len(classes_) + self.task_offset[t]]
@@ -355,6 +348,19 @@ class Appr(Inc_Learning_Appr):
         # Add new train membeddings to memory
         self.add_membeddings_to_reservoir(self.mem_train_dataset, trn_loader.dataset, t, transforms, self.membeddings_per_class)
         self.add_membeddings_to_reservoir(self.mem_valid_dataset, val_loader.dataset, t, transforms, self.membeddings_per_class_val)
+
+    @torch.no_grad()
+    def update_memory(self, mem_dataset):
+        mem_loader = torch.utils.data.DataLoader(mem_dataset, batch_size=128, num_workers=0, shuffle=False)
+        index = 0
+        for old_membedding, _, _ in mem_loader:
+            bsz = old_membedding.shape[0]
+            old_membedding = old_membedding.to(self.device)
+            _, new_reconstructed = self.slow_learner.decoder(old_membedding)
+            # new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
+            # self.mem_dataset.membeddings[index:index + bsz] = new_membeddings.cpu()
+            mem_dataset.reconstructed[index:index + bsz] = batch_to_numpy_images(new_reconstructed.cpu())
+            index += bsz
 
     @torch.no_grad()
     def add_membeddings_to_reservoir(self, mem_dataset, src_dataset, t, transforms, num_to_store):
