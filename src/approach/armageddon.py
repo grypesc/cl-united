@@ -102,13 +102,9 @@ class SlowLearner(nn.Module):
             feature_maps = self.layers1(x)
             return feature_maps, self.layers2(feature_maps)
 
-    def __init__(self, z_size, planes=(3, 64, 128, 256, 512)):
+    def __init__(self, z_size):
         super().__init__()
         self.z_size = z_size
-        self.planes = planes
-
-        self.linear1 = nn.Conv2d(planes[0], planes[1], kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes[1])
         self.encoder = SlowLearner.EncoderBlock()
         self.decoder = SlowLearner.DecoderBlock()
 
@@ -119,33 +115,6 @@ class SlowLearner(nn.Module):
             return z
         feature_maps, x = self.decoder(x)
         return z, feature_maps, x
-
-    def visualize(self, out, target, prefix=""):
-        out, target = out[0].cpu(), target[0].cpu()
-        out = out.permute(1, 2, 0)
-        target = target.permute(1, 2, 0)
-        mean = torch.tensor([0.5071, 0.4866, 0.4409]).unsqueeze(0).unsqueeze(0)
-        std = torch.tensor([0.2009, 0.1984, 0.2023]).unsqueeze(0).unsqueeze(0)
-        out = torch.clip(255 * (out * std + mean), min=0, max=255)
-        target = torch.clip(255 * (target * std + mean), min=0, max=255)
-        out = Image.fromarray(np.array(out, dtype=np.uint8))
-        target = Image.fromarray(np.array(target, dtype=np.uint8))
-        out.save(f"{prefix}_out.png")
-        target.save(f"{prefix}_gt.png")
-
-
-# class MLP(nn.Module):
-#     def __init__(self, z_size, hidden_size, out_size):
-#         super().__init__()
-#         self.linear1 = nn.Linear(z_size, 4 * hidden_size)
-#         self.linear2 = nn.Linear(4 * hidden_size, hidden_size)
-#         self.out = nn.Linear(hidden_size, out_size)
-#         self.activation = nn.LeakyReLU()
-#
-#     def forward(self, x):
-#         x = self.activation(self.linear1(x))
-#         x = self.activation(self.linear2(x))
-#         return self.out(x)
 
 
 class Appr(Inc_Learning_Appr):
