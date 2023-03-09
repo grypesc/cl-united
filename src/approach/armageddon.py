@@ -214,7 +214,9 @@ class Appr(Inc_Learning_Appr):
         milestones = [50, 100, 150]
         if len(self.mem_train_dataset) > 0:
             self.mem_train_dataset.set_transforms(trn_loader.dataset.transform)
-            mem_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+            self.mem_valid_dataset.set_transforms(trn_loader.dataset.transform)
+            mem_train_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+            mem_val_loader = torch.utils.data.DataLoader(self.mem_valid_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.slow_epochs // 2
             milestones = [40, 60, 80]
         optimizer, lr_scheduler = self._get_slow_optimizer(model, self.slow_wd, milestones=milestones)
@@ -228,12 +230,12 @@ class Appr(Inc_Learning_Appr):
                 _, _, reconstructed = model(images)
                 loss = nn.functional.mse_loss(reconstructed, images)
 
-                # if len(self.mem_dataset) > 0:
-                #     mem_loader_iter = iter(mem_loader)
-                #     mem_images = next(mem_loader_iter)[0].to(self.device)
-                #     _, _, mem_reconstructed = model(mem_images)
-                #     mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
-                #     loss = (1 - self.alpha) * loss + self.alpha * mem_loss
+                if len(self.mem_train_dataset) > 0 and self.alpha > 0.0:
+                    mem_loader_iter = iter(mem_train_loader)
+                    mem_images = next(mem_loader_iter)[1].to(self.device)
+                    _, _, mem_reconstructed = model(mem_images)
+                    mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
+                    loss = (1 - self.alpha) * loss + self.alpha * mem_loss
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
@@ -249,12 +251,12 @@ class Appr(Inc_Learning_Appr):
                     z, _, reconstructed = model(images)
                     loss = nn.functional.mse_loss(reconstructed, images)
 
-                    # if len(self.mem_dataset) > 0:
-                    #     mem_loader_iter = iter(mem_loader)
-                    #     mem_images = next(mem_loader_iter)[0].to(self.device)
-                    #     _, _, mem_reconstructed = model(mem_images)
-                    #     mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
-                    #     loss = (1 - self.alpha) * loss + self.alpha * mem_loss
+                    if len(self.mem_train_dataset) > 0 and self.alpha > 0.0:
+                        mem_loader_iter = iter(mem_val_loader)
+                        mem_images = next(mem_loader_iter)[1].to(self.device)
+                        _, _, mem_reconstructed = model(mem_images)
+                        mem_loss = nn.functional.mse_loss(mem_reconstructed, mem_images)
+                        loss = (1 - self.alpha) * loss + self.alpha * mem_loss
 
                     valid_loss.append(float(bsz * loss))
 
