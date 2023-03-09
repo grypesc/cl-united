@@ -202,7 +202,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--slow-wd',
                             help='weight decay of slow learner',
                             type=float,
-                            default=1e-8)
+                            default=1e-5)
         parser.add_argument('--fast-lr',
                             help='learning rate of fast learner',
                             type=float,
@@ -210,7 +210,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--fast-wd',
                             help='weight decay of fast learner',
                             type=float,
-                            default=1e-5)
+                            default=1e-4)
         parser.add_argument('--freeze-encoder',
                             help='freeze encoder after first task',
                             action='store_true',
@@ -232,21 +232,20 @@ class Appr(Inc_Learning_Appr):
             self.train_slow_learner(trn_loader, val_loader)
         # state_dict = torch.load("slow_learner_10.pth")
         # self.slow_learner.load_state_dict(state_dict, strict=True)
-        self.store_membeddings(t, trn_loader, val_loader, val_loader.dataset.transform)
+        self.manage_memory(t, trn_loader, val_loader, val_loader.dataset.transform)
         print(f"Training fast learner after task {t}")
         self.train_fast_learner(t, trn_loader, val_loader)
         self.dump_visualizations(t)
 
     def train_slow_learner(self, trn_loader, val_loader):
-
         model = self.slow_learner
         model.to(self.device)
         print(f'Slow learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         epochs = self.slow_epochs
         milestones = [50, 100, 150]
         if len(self.mem_train_dataset) > 0:
-            # self.mem_dataset.set_transforms(trn_loader.dataset.transform)
-            # mem_loader = torch.utils.data.DataLoader(self.mem_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+            self.mem_train_dataset.set_transforms(trn_loader.dataset.transform)
+            mem_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.slow_epochs // 2
             milestones = [40, 60, 80]
         optimizer, lr_scheduler = self._get_slow_optimizer(model, self.slow_wd, milestones=milestones)
@@ -298,18 +297,17 @@ class Appr(Inc_Learning_Appr):
         torch.save(self.slow_learner.state_dict(), f"slow_learner.pth")
 
     def train_fast_learner(self, t, trn_loader, val_loader):
-        model = self.fast_learner
+        model = resnet32()
         model.fc = nn.Linear(64, self.task_offset[t+1])
         model.to(self.device)
-        print(f'Classifier has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+        print(f'Fast learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
 
-        self.slow_learner.eval()
         self.mem_train_dataset.set_transforms(trn_loader.dataset.transform)
         self.mem_valid_dataset.set_transforms(val_loader.dataset.transform)
         mem_train_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
         mem_val_loader = torch.utils.data.DataLoader(self.mem_valid_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
 
-        optimizer, lr_scheduler = self._get_fast_optimizer(model, self.fast_wd, milestones=[50, 100, 150])
+        optimizer, lr_scheduler = self._get_fast_optimizer(model, self.fast_wd)
         for epoch in range(self.fast_epochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
@@ -347,7 +345,7 @@ class Appr(Inc_Learning_Appr):
         self.fast_learner = model
 
     @torch.no_grad()
-    def store_membeddings(self, t, trn_loader, val_loader, transforms):
+    def manage_memory(self, t, trn_loader, val_loader, transforms):
         self.slow_learner.eval()
         self.mem_train_dataset.set_transforms(transforms)
         self.mem_valid_dataset.set_transforms(transforms)
@@ -361,8 +359,8 @@ class Appr(Inc_Learning_Appr):
         self.task_offset += [len(classes_) + self.task_offset[t]]
 
         # Add new train membeddings to memory
-        self.add_membeddings_to_reservoir(self.mem_train_dataset, trn_loader.dataset, t, transforms, self.membeddings_per_class)
-        self.add_membeddings_to_reservoir(self.mem_valid_dataset, val_loader.dataset, t, transforms, self.membeddings_per_class_val)
+        self.add_membeddings_to_memory(self.mem_train_dataset, trn_loader.dataset, t, transforms, self.membeddings_per_class)
+        self.add_membeddings_to_memory(self.mem_valid_dataset, val_loader.dataset, t, transforms, self.membeddings_per_class_val)
 
     @torch.no_grad()
     def update_memory(self, mem_dataset):
@@ -378,7 +376,7 @@ class Appr(Inc_Learning_Appr):
             index += bsz
 
     @torch.no_grad()
-    def add_membeddings_to_reservoir(self, mem_dataset, src_dataset, t, transforms, num_to_store):
+    def add_membeddings_to_memory(self, mem_dataset, src_dataset, t, transforms, num_to_store):
         labels = np.array(src_dataset.labels)
         classes_ = set(src_dataset.labels)
         for i in classes_:
@@ -433,13 +431,11 @@ class Appr(Inc_Learning_Appr):
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
     def _get_slow_optimizer(self, model, wd, milestones=[60, 120, 160]):
-        """Returns the optimizer"""
         optimizer = torch.optim.AdamW(model.parameters(), lr=self.slow_lr, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
     def _get_fast_optimizer(self, model, wd, milestones=[60, 120, 160]):
-        """Returns the optimizer"""
         optimizer = torch.optim.SGD(model.parameters(), lr=self.fast_lr, weight_decay=wd, momentum=self.momentum)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
