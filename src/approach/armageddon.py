@@ -337,12 +337,12 @@ class Appr(Inc_Learning_Appr):
     def update_memory(self, mem_dataset):
         mem_loader = torch.utils.data.DataLoader(mem_dataset, batch_size=128, num_workers=0, shuffle=False)
         index = 0
-        for old_membedding, _, _ in mem_loader:
+        for old_membedding, old_reconstructed, _ in mem_loader:
             bsz = old_membedding.shape[0]
-            old_membedding = old_membedding.to(self.device)
-            _, new_reconstructed = self.slow_learner.decoder(old_membedding)
-            # new_membeddings, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
-            # self.mem_dataset.membeddings[index:index + bsz] = new_membeddings.cpu()
+            old_membedding, old_reconstructed = old_membedding.to(self.device), old_reconstructed.to(self.device)
+            # _, new_reconstructed = self.slow_learner.decoder(old_membedding)
+            new_membedding, _, new_reconstructed = self.slow_learner(old_reconstructed, decode=True)
+            mem_dataset.membeddings[index:index + bsz] = new_membedding.cpu()
             mem_dataset.reconstructed[index:index + bsz] = batch_to_numpy_images(new_reconstructed.cpu())
             index += bsz
 
