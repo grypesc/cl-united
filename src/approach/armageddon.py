@@ -179,11 +179,11 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--slow-lr',
                             help='learning rate of slow learner',
                             type=float,
-                            default=1e-3)
+                            default=1e-2)
         parser.add_argument('--slow-wd',
                             help='weight decay of slow learner',
                             type=float,
-                            default=1e-5)
+                            default=1e-4)
         parser.add_argument('--fast-lr',
                             help='learning rate of fast learner',
                             type=float,
@@ -227,7 +227,7 @@ class Appr(Inc_Learning_Appr):
         milestones = [50, 100, 150]
         if len(self.mem_train_dataset) > 0:
             self.mem_train_dataset.set_transforms(trn_loader.dataset.transform)
-            self.mem_valid_dataset.set_transforms(trn_loader.dataset.transform)
+            self.mem_valid_dataset.set_transforms(val_loader.dataset.transform)
             mem_train_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             mem_val_loader = torch.utils.data.DataLoader(self.mem_valid_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.slow_epochs // 2
@@ -276,7 +276,7 @@ class Appr(Inc_Learning_Appr):
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f}")
+            print(f"Epoch: {epoch} Train loss: {100*train_loss:.2f} Val loss: {100*valid_loss:.2f}")
         self.slow_learner = model
         torch.save(self.slow_learner.state_dict(), f"slow_learner.pth")
 
@@ -366,7 +366,7 @@ class Appr(Inc_Learning_Appr):
                     valid_loss.append(float(bsz * loss))
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f}")
+            print(f"Epoch: {epoch} Train loss: {100*train_loss:.2f} Val loss: {100*valid_loss:.2f}")
 
         # Adapt features
         with torch.no_grad():
@@ -472,7 +472,7 @@ class Appr(Inc_Learning_Appr):
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
     def _get_slow_optimizer(self, model, wd, milestones=[60, 120, 160]):
-        optimizer = torch.optim.AdamW(model.parameters(), lr=self.slow_lr, weight_decay=wd)
+        optimizer = torch.optim.SGD(model.parameters(), lr=self.slow_lr, weight_decay=wd, momentum=self.momentum)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
