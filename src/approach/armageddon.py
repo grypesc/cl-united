@@ -117,6 +117,18 @@ class SlowLearner(nn.Module):
         return z, feature_maps, x
 
 
+class Adaptator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(8, 128, kernel_size=3, stride=1, padding=1)
+        self.activation = nn.GELU()
+        self.out = nn.Conv2d(128, 8, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        x = self.activation(self.conv1(x))
+        return self.out(x)
+
+
 class Appr(Inc_Learning_Appr):
     """https://www.youtube.com/watch?v=wfa9xH3cJ8E"""
 
@@ -196,12 +208,13 @@ class Appr(Inc_Learning_Appr):
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
+        old_slow_learner = copy.deepcopy(self.slow_learner)
         if not self.freeze_encoder or t == 0:
             print(f"Training slow learner on task {t}")
             self.train_slow_learner(trn_loader, val_loader)
         # state_dict = torch.load("slow_learner_10.pth")
         # self.slow_learner.load_state_dict(state_dict, strict=True)
-        self.manage_memory(t, trn_loader, val_loader, val_loader.dataset.transform)
+        self.manage_memory(old_slow_learner, t, trn_loader, val_loader, val_loader.dataset.transform)
         print(f"Training fast learner after task {t}")
         self.train_fast_learner(t, trn_loader, val_loader)
         self.dump_visualizations(t)
@@ -315,16 +328,71 @@ class Appr(Inc_Learning_Appr):
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
         self.fast_learner = model
 
-    @torch.no_grad()
-    def manage_memory(self, t, trn_loader, val_loader, transforms):
+    def membeddings_adaptation(self, old_slow_learner, trn_loader, val_loader):
+        print("Features adaptation:")
+        old_slow_learner.eval()
         self.slow_learner.eval()
+        model = Adaptator()
+        model.to(self.device)
+        # Train feature adaptator network
+        optimizer, lr_scheduler = self._get_fast_optimizer(model, self.slow_wd, milestones=[30, 60, 90])
+        for epoch in range(self.slow_epochs // 2):
+            train_loss, valid_loss = [], []
+            model.train()
+            for images, _ in trn_loader:
+                bsz = images.shape[0]
+                images = images.to(self.device)
+                optimizer.zero_grad()
+                with torch.no_grad():
+                    old_features = old_slow_learner.encoder(images)
+                    new_features = self.slow_learner.encoder(images)
+                estimated_new_features = model(old_features)
+                loss = nn.functional.mse_loss(estimated_new_features, new_features)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.clipgrad)
+                optimizer.step()
+                train_loss.append(float(bsz * loss))
+            lr_scheduler.step()
+
+            model.eval()
+            with torch.no_grad():
+                for images, _ in val_loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device)
+                    old_features = old_slow_learner.encoder(images)
+                    new_features = self.slow_learner.encoder(images)
+                    estimated_new_features = model(old_features)
+                    loss = nn.functional.mse_loss(estimated_new_features, new_features)
+                    valid_loss.append(float(bsz * loss))
+            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            valid_loss = sum(valid_loss) / len(val_loader.dataset)
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f}")
+
+        # Adapt features
+        with torch.no_grad():
+            for mem_dataset in [self.mem_train_dataset, self.mem_valid_dataset]:
+                mem_loader = torch.utils.data.DataLoader(mem_dataset, batch_size=128, num_workers=0, shuffle=False)
+                index = 0
+                for old_membedding, _, _ in mem_loader:
+                    bsz = old_membedding.shape[0]
+                    old_membedding = old_membedding.to(self.device).reshape(bsz, 8, 8, 8)
+                    # _, new_reconstructed = self.slow_learner.decoder(old_membedding)
+                    new_membedding = model(old_membedding)
+                    new_reconstructed = self.slow_learner.decoder(new_membedding)[1]
+                    new_membedding = new_membedding.reshape(bsz, -1)
+                    mem_dataset.membeddings[index:index + bsz] = new_membedding.cpu()
+                    mem_dataset.reconstructed[index:index + bsz] = batch_to_numpy_images(new_reconstructed.cpu())
+                    index += bsz
+
+    def manage_memory(self, old_slow_learner, t, trn_loader, val_loader, transforms):
         self.mem_train_dataset.set_transforms(transforms)
         self.mem_valid_dataset.set_transforms(transforms)
 
         # Update old reconstruction
         if len(self.mem_train_dataset) > 0:
-            self.update_memory(self.mem_train_dataset)
-            self.update_memory(self.mem_valid_dataset)
+            # self.update_memory(self.mem_train_dataset)
+            # self.update_memory(self.mem_valid_dataset)
+            self.membeddings_adaptation(old_slow_learner, trn_loader, val_loader)
 
         classes_ = set(trn_loader.dataset.labels)
         self.task_offset += [len(classes_) + self.task_offset[t]]
@@ -335,6 +403,7 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def update_memory(self, mem_dataset):
+        self.slow_learner.eval()
         mem_loader = torch.utils.data.DataLoader(mem_dataset, batch_size=128, num_workers=0, shuffle=False)
         index = 0
         for old_membedding, old_reconstructed, _ in mem_loader:
@@ -348,6 +417,7 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def add_membeddings_to_memory(self, mem_dataset, src_dataset, t, transforms, num_to_store):
+        self.slow_learner.eval()
         labels = np.array(src_dataset.labels)
         classes_ = set(src_dataset.labels)
         for i in classes_:
