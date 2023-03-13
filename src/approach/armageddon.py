@@ -179,7 +179,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--slow-lr',
                             help='learning rate of slow learner',
                             type=float,
-                            default=1e-2)
+                            default=1e-3)
         parser.add_argument('--slow-wd',
                             help='weight decay of slow learner',
                             type=float,
@@ -224,14 +224,14 @@ class Appr(Inc_Learning_Appr):
         model.to(self.device)
         print(f'Slow learner has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         epochs = self.slow_epochs
-        milestones = [50, 100, 150]
+        milestones = [50, 100, 150, 190]
         if len(self.mem_train_dataset) > 0:
             self.mem_train_dataset.set_transforms(trn_loader.dataset.transform)
             self.mem_valid_dataset.set_transforms(val_loader.dataset.transform)
             mem_train_loader = torch.utils.data.DataLoader(self.mem_train_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             mem_val_loader = torch.utils.data.DataLoader(self.mem_valid_dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
             epochs = self.slow_epochs // 2
-            milestones = [40, 60, 80]
+            milestones = [40, 60, 80, 95]
         optimizer, lr_scheduler = self._get_slow_optimizer(model, self.slow_wd, milestones=milestones)
         for epoch in range(epochs):
             train_loss, valid_loss = [], []
@@ -472,7 +472,7 @@ class Appr(Inc_Learning_Appr):
         return total_loss / total_num, total_acc_taw / total_num, total_acc_tag / total_num
 
     def _get_slow_optimizer(self, model, wd, milestones=[60, 120, 160]):
-        optimizer = torch.optim.SGD(model.parameters(), lr=self.slow_lr, weight_decay=wd, momentum=self.momentum)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.slow_lr, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
