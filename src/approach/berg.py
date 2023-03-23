@@ -201,8 +201,8 @@ class Appr(Inc_Learning_Appr):
                 classes_in_t = self.model.taskcla[t][1]
                 old_distributions = self.experts_distributions[bb_num][:-classes_in_t]
                 new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
-                kl_matrix = torch.zeros((len(new_distributions), len(old_distributions)), device=self.device)
-                for o, old_gauss_ in enumerate(old_distributions):
+                kl_matrix = torch.zeros((len(new_distributions), len(new_distributions)), device=self.device)
+                for o, old_gauss_ in enumerate(new_distributions):
                     old_gauss = MultivariateNormal(old_gauss_.mu.data[0][0], covariance_matrix=old_gauss_.var.data[0][0])
                     for n, new_gauss_ in enumerate(new_distributions):
                         new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
