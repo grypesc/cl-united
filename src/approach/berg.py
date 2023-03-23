@@ -73,7 +73,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--ft-selection-strategy',
                             help='Expert selection strategy for fine-tuning',
                             type=str,
-                            choices=["robin", "random", "softmax", "kl"],
+                            choices=["robin", "random", "softmax", "kl-max", "kl-min"],
                             default="softmax")
         parser.add_argument('--ftepochs',
                             help='Number of epochs for finetuning an expert',
@@ -192,7 +192,7 @@ class Appr(Inc_Learning_Appr):
             return t % self.max_experts
         if self.ft_selection_strategy == "random":
             return random.randint(0, self.max_experts-1)
-        if self.ft_selection_strategy == "kl":
+        if "kl-" in self.ft_selection_strategy:
             # Perform expert selection based on KL divergence between old and new distributions
             print(f"Creating distributions #2 for task {t}:")
             self.create_distributions(t, trn_loader, val_loader)
@@ -207,12 +207,16 @@ class Appr(Inc_Learning_Appr):
                     for n, new_gauss_ in enumerate(new_distributions):
                         new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
                         kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
-                expert_overlap[bb_num] = torch.topk(kl_matrix, dim=1, k=3, largest=False)[0].mean()
+                expert_overlap[bb_num] = torch.mean(kl_matrix)
                 self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
             print(f"Expert overlap:{expert_overlap}")
-            bb_to_finetune = torch.argmax(expert_overlap)
+            if self.ft_selection_strategy == "kl-min":
+                bb_to_finetune = torch.argmin(expert_overlap)
+            else:
+                bb_to_finetune = torch.argmax(expert_overlap)
             self.model.task_offset = self.model.task_offset[:-1]
-            return bb_to_finetune
+            return int(bb_to_finetune)
+
         if self.ft_selection_strategy == "softmax":
             # Perform expert selection based on new samples overlapping with old distributions
             trn_loader = copy.deepcopy(trn_loader)
@@ -475,6 +479,6 @@ class Appr(Inc_Learning_Appr):
 
     def _get_optimizer(self, num, wd, milestones=[60, 120, 160]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=wd, momentum=self.momentum)
+        optimizer = torch.optim.SGD(self.model.bbs[num].parameters(), lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
