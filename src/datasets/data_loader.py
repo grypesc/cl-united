@@ -1,4 +1,7 @@
 import os, glob
+import random
+from itertools import compress
+
 import numpy as np
 from torch.utils import data
 import torchvision.transforms as transforms
@@ -139,15 +142,18 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
         # set dataset type
         Dataset = memd.MemoryDataset
 
-    else:
-        if dataset == 'imagenet_subset_kaggle':
-            _ensure_imagenet_subset_prepared(path)
-
+    elif dataset == 'imagenet_subset_kaggle':
+        _ensure_imagenet_subset_prepared(path)
         # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
-                                                            validation=validation, shuffle_classes=class_order is None,
-                                                            class_order=class_order)
-        # set dataset type
+                                                                validation=validation, shuffle_classes=class_order is None,
+                                                                class_order=class_order)
+        Dataset = basedat.BaseDataset
+
+    elif dataset == 'domainnet':
+        _ensure_domainnet_prepared(path, classes_per_domain=nc_first_task)
+        all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
+                                                                validation=validation, shuffle_classes=False)
         Dataset = basedat.BaseDataset
 
     # get datasets, apply correct label offsets for each task
@@ -237,3 +243,23 @@ def _ensure_imagenet_subset_prepared(path):
                 f.write(f"{relative_path} {lbl}\n")
     prepare_split()
     prepare_split('val', outfile='test.txt')
+
+def _ensure_domainnet_prepared(path, classes_per_domain=50):
+    assert os.path.exists(path), f"Please first download and extract dataset from: http://ai.bu.edu/M3SDA/#dataset into:{path}"
+    domains = ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"]
+    random.shuffle(domains)
+    for set_type in ["train", "test"]:
+        samples = []
+        for i, domain in enumerate(domains):
+            with open(f"{path}/{domain}_{set_type}.txt", 'r') as f:
+                lines = list(map(lambda x: x.replace("\n", "").split(" "), f.readlines()))
+            paths, classes = zip(*lines)
+            classes = np.array(list(map(float, classes)))
+            offset = classes_per_domain * i
+            for c in range(classes_per_domain):
+                is_class = classes == c
+                class_samples = list(compress(paths, is_class))
+                samples.extend([*[f"{row} {c + offset}" for row in class_samples]])
+        with open(f"{path}/{set_type}.txt", 'wt') as f:
+            for sample in samples:
+                f.write(f"{sample}\n")
