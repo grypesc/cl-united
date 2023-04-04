@@ -1,6 +1,6 @@
 from os.path import join
 
-_BASE_DATA_PATH = "../data"
+_BASE_DATA_PATH = "../data" #"/raid/NFS_SHARE/datasets/"
 
 dataset_config = {
     'mnist': {
