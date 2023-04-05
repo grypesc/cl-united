@@ -246,8 +246,7 @@ def _ensure_imagenet_subset_prepared(path):
 
 def _ensure_domainnet_prepared(path, classes_per_domain=50):
     assert os.path.exists(path), f"Please first download and extract dataset from: http://ai.bu.edu/M3SDA/#dataset into:{path}"
-    domains = ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"]
-    random.shuffle(domains)
+    domains = ["quickdraw", "clipart", "infograph", "painting", "real", "sketch"]
     for set_type in ["train", "test"]:
         samples = []
         for i, domain in enumerate(domains):
