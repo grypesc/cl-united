@@ -205,6 +205,8 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
             trn_transform_list.append(CIFAR10Policy())
         elif 'imagenet' in ds_name.lower():
             trn_transform_list.append(ImageNetPolicy())
+        elif 'domainnet' in ds_name.lower():
+            trn_transform_list.append(ImageNetPolicy())
         else:
             raise RuntimeError(f'Please check and update the data agumentation code for your dataset: {ds_name}')
       
