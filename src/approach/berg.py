@@ -56,7 +56,7 @@ class Appr(Inc_Learning_Appr):
         self.compensate_drifts = compensate_drifts
         self.model.to(device)
         self.experts_distributions = []
-        self.layers_trainable = ["layer1", "layer2", "layer3", "layer4", "bottleneck"]
+        self.shared_layers = [] # ["conv1.weight", "bn1.weight", "bn1.bias"]
 
     @staticmethod
     def extra_parser(args):
@@ -127,19 +127,17 @@ class Appr(Inc_Learning_Appr):
         self.create_distributions(t, trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader):
+        self.model.bbs.append(self.model.bb_fun(num_classes=self.model.taskcla[t][1], num_features=self.model.num_features))
+        model = self.model.bbs[t]
         if t == 0:
-            model = self.model.bbs[0]
             for param in model.parameters():
                 param.requires_grad = True
         else:
-            self.model.bbs.append(copy.deepcopy(self.model.bbs[0]))
-            model = self.model.bbs[t]
             for name, param in model.named_parameters():
-                param.requires_grad = False
-                for layer in self.layers_trainable:
-                    if layer in name:
-                        param.requires_grad = True
-            model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
+                param.requires_grad = True
+                if name in self.shared_layers:
+                    model.get_parameter(name).data = self.model.bbs[0].get_parameter(name).data
+                    param.requires_grad = False
         print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
 
@@ -199,7 +197,6 @@ class Appr(Inc_Learning_Appr):
             expert_overlap = torch.zeros(self.max_experts, device=self.device)
             for bb_num in range(self.max_experts):
                 classes_in_t = self.model.taskcla[t][1]
-                old_distributions = self.experts_distributions[bb_num][:-classes_in_t]
                 new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
                 kl_matrix = torch.zeros((len(new_distributions), len(new_distributions)), device=self.device)
                 for o, old_gauss_ in enumerate(new_distributions):
@@ -255,12 +252,13 @@ class Appr(Inc_Learning_Appr):
 
         model = self.model.bbs[bb_to_finetune]
         for name, param in model.named_parameters():
-            param.requires_grad = False
-            for layer in self.layers_trainable:
-                if layer in name:
-                    param.requires_grad = True
+            param.requires_grad = True
+            if name in self.shared_layers:
+                param.requires_grad = False
         model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         model.to(self.device)
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
 
         optimizer, lr_scheduler = self._get_optimizer(bb_to_finetune, wd=self.ftwd, milestones=[30, 60, 80])
         for epoch in range(self.ftepochs):

@@ -162,21 +162,20 @@ class ExtractorEnsemble(LLL_Net):
         self.num_features = 64
         self.network_type = network_type
         if network_type == "resnet18":
-            bb = resnet18(num_classes=taskcla[0][1], num_features=self.num_features)
+            self.bb_fun = resnet18
         elif network_type == "resnet34":
-            bb = resnet34(num_classes=taskcla[0][1], num_features=self.num_features)
+            self.bb_fun = resnet34
         elif network_type == "resnet50":
-            bb = resnet50(num_classes=taskcla[0][1], num_features=self.num_features)
+            self.bb_fun = resnet50
         elif network_type == "resnet32":
-            bb = resnet32(num_classes=taskcla[0][1])
+            self.bb_fun = resnet32
         elif network_type == "resnet20":
             self.num_features = 24
-            bb = resnet20(num_classes=taskcla[0][1], num_features=self.num_features)
+            self.bb_fun = resnet20
         else:
-            print("This network is not supported by EGE, using resnet32.")
-            bb = resnet32(num_classes=taskcla[0][1])
+            raise RuntimeError("Network not supported")
 
-        self.bbs = nn.ModuleList([bb])
+        self.bbs = nn.ModuleList([])
         self.head = nn.Identity()
 
         # Uncomment to load a model, set 6 to number of experts that's in .pth, comment backbone training
