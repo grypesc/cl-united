@@ -361,12 +361,12 @@ class Appr(Inc_Learning_Appr):
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader):
         """ Create distributions for task t"""
-        eps = 1e-8
         self.model.eval()
         classes = self.model.taskcla[t][1]
         self.model.task_offset.append(self.model.task_offset[-1] + classes)
         transforms = val_loader.dataset.transform
         for bb_num in range(min(self.max_experts, t+1)):
+            eps = 1e-6
             model = self.model.bbs[bb_num]
             for c in range(classes):
                 c = c + self.model.task_offset[t]
