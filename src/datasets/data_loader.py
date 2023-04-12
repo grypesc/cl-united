@@ -151,7 +151,7 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
         Dataset = basedat.BaseDataset
 
     elif dataset == 'domainnet':
-        _ensure_domainnet_prepared(path, classes_per_domain=nc_first_task)
+        _ensure_domainnet_prepared(path, classes_per_domain=nc_first_task, num_tasks=num_tasks)
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
                                                                 validation=validation, shuffle_classes=False)
         Dataset = basedat.BaseDataset
@@ -246,9 +246,9 @@ def _ensure_imagenet_subset_prepared(path):
     prepare_split()
     prepare_split('val', outfile='test.txt')
 
-def _ensure_domainnet_prepared(path, classes_per_domain=50):
+def _ensure_domainnet_prepared(path, classes_per_domain=50, num_tasks=6):
     assert os.path.exists(path), f"Please first download and extract dataset from: http://ai.bu.edu/M3SDA/#dataset into:{path}"
-    domains = ["clipart", "infograph", "painting",  "quickdraw", "real", "sketch"]
+    domains = ["clipart", "infograph", "painting",  "quickdraw", "real", "sketch"] * (num_tasks // 6)
     for set_type in ["train", "test"]:
         samples = []
         for i, domain in enumerate(domains):
@@ -258,7 +258,7 @@ def _ensure_domainnet_prepared(path, classes_per_domain=50):
             classes = np.array(list(map(float, classes)))
             offset = classes_per_domain * i
             for c in range(classes_per_domain):
-                is_class = classes == c
+                is_class = classes == c + ((i // 6) * classes_per_domain)
                 class_samples = list(compress(paths, is_class))
                 samples.extend([*[f"{row} {c + offset}" for row in class_samples]])
         with open(f"{path}/{set_type}.txt", 'wt') as f:
