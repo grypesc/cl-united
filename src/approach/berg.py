@@ -127,8 +127,12 @@ class Appr(Inc_Learning_Appr):
         self.create_distributions(t, trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader):
-        self.model.bbs.append(self.model.bb_fun(num_classes=self.model.taskcla[t][1], num_features=self.model.num_features))
+        if t == 0:
+            self.model.bbs.append(self.model.bb_fun(num_classes=self.model.taskcla[t][1], num_features=self.model.num_features))
+        else:
+            self.model.bbs.append(copy.deepcopy(self.model.bbs[0]))
         model = self.model.bbs[t]
+        model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         if t == 0:
             for param in model.parameters():
                 param.requires_grad = True
@@ -366,7 +370,7 @@ class Appr(Inc_Learning_Appr):
         self.model.task_offset.append(self.model.task_offset[-1] + classes)
         transforms = val_loader.dataset.transform
         for bb_num in range(min(self.max_experts, t+1)):
-            eps = 1e-6
+            eps = 1e-8
             model = self.model.bbs[bb_num]
             for c in range(classes):
                 c = c + self.model.task_offset[t]
