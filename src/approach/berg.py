@@ -37,7 +37,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
-                 remove_outliers=False, compensate_drifts=False):
+                 initialization_strategy="first", remove_outliers=False, compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -57,6 +57,7 @@ class Appr(Inc_Learning_Appr):
         self.model.to(device)
         self.experts_distributions = []
         self.shared_layers = [] # ["conv1.weight", "bn1.weight", "bn1.bias"]
+        self.initialization_strategy = initialization_strategy
 
     @staticmethod
     def extra_parser(args):
@@ -75,6 +76,11 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["robin", "random", "softmax", "kl-max", "kl-min"],
                             default="softmax")
+        parser.add_argument('--initialization-strategy',
+                            help='How to initialize experts weight',
+                            type=str,
+                            choices=["first", "random"],
+                            default="first")
         parser.add_argument('--ftepochs',
                             help='Number of epochs for finetuning an expert',
                             type=int,
@@ -127,7 +133,7 @@ class Appr(Inc_Learning_Appr):
         self.create_distributions(t, trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader):
-        if t == 0:
+        if self.initialization_strategy == "random" or t==0:
             self.model.bbs.append(self.model.bb_fun(num_classes=self.model.taskcla[t][1], num_features=self.model.num_features))
         else:
             self.model.bbs.append(copy.deepcopy(self.model.bbs[0]))
