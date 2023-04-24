@@ -97,18 +97,17 @@ class Inc_Learning_Appr:
 
     def train_loop(self, t, trn_loader, val_loader):
         """Contains the epochs loop"""
-        lr = self.lr
-        best_loss = np.inf
         patience = self.lr_patience
-        best_model = self.model.get_copy()
 
         self.optimizer = self._get_optimizer()
+        lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=self.optimizer, milestones=[60, 120, 180], gamma=0.1)
 
         # Loop epochs
         for e in range(self.nepochs):
             # Train
             clock0 = time.time()
             self.train_epoch(t, trn_loader)
+            lr_scheduler.step()
             clock1 = time.time()
             if self.eval_on_train:
                 train_loss, train_acc, _ = self.eval(t, trn_loader)
@@ -130,31 +129,9 @@ class Inc_Learning_Appr:
             self.logger.log_scalar(task=t, iter=e + 1, name="acc", value=100 * valid_acc, group="valid")
 
             # Adapt learning rate - patience scheme - early stopping regularization
-            if valid_loss < best_loss:
-                # if the loss goes down, keep it as the best model and end line with a star ( * )
-                best_loss = valid_loss
-                best_model = self.model.get_copy()
-                patience = self.lr_patience
-                print(' *', end='')
-            else:
-                # if the loss does not go down, decrease patience
-                patience -= 1
-                if patience <= 0:
-                    # if it runs out of patience, reduce the learning rate
-                    lr /= self.lr_factor
-                    print(' lr={:.1e}'.format(lr), end='')
-                    if lr < self.lr_min:
-                        # if the lr decreases below minimum, stop the training session
-                        print()
-                        break
-                    # reset patience and recover best model so far to continue training
-                    patience = self.lr_patience
-                    self.optimizer.param_groups[0]['lr'] = lr
-                    self.model.set_state_dict(best_model)
             self.logger.log_scalar(task=t, iter=e + 1, name="patience", value=patience, group="train")
-            self.logger.log_scalar(task=t, iter=e + 1, name="lr", value=lr, group="train")
+            self.logger.log_scalar(task=t, iter=e + 1, name="lr", value=self.optimizer.param_groups[0]['lr'], group="train")
             print()
-        self.model.set_state_dict(best_model)
 
     def post_train_process(self, t, trn_loader):
         """Runs after training all the epochs of the task (after the train session)"""

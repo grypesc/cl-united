@@ -13,7 +13,7 @@ from .resnet32_linear_bottleneck import resnet20
 class LLL_Net(nn.Module):
     """Basic class for implementing networks"""
 
-    def __init__(self, model, remove_existing_head=False):
+    def __init__(self, model, taskcla, remove_existing_head=False):
         head_var = model.head_var
         assert type(head_var) == str
         assert not remove_existing_head or hasattr(model, head_var), \
@@ -23,6 +23,7 @@ class LLL_Net(nn.Module):
         super(LLL_Net, self).__init__()
 
         self.model = model
+        self.taskcla = taskcla
         last_layer = getattr(self.model, head_var)
 
         if remove_existing_head:

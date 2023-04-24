@@ -49,6 +49,8 @@ class Appr(Inc_Learning_Appr):
         # add new datasets to existing cumulative ones
         self.trn_datasets.append(trn_loader.dataset)
         self.val_datasets.append(val_loader.dataset)
+        if t != len(self.model.taskcla) - 1:
+            return
         trn_dset = JointDataset(self.trn_datasets)
         val_dset = JointDataset(self.val_datasets)
         trn_loader = DataLoader(trn_dset,
