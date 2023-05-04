@@ -158,7 +158,7 @@ class Extractor(LLL_Net):
 class ExtractorEnsemble(LLL_Net):
 
     def __init__(self, backbone, taskcla, network_type, device):
-        super().__init__(backbone, remove_existing_head=False)
+        super().__init__(backbone, taskcla, remove_existing_head=False)
         self.model = None
         self.num_features = 64
         self.network_type = network_type
