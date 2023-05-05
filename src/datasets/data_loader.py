@@ -192,7 +192,10 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
 
     # crop
     if crop is not None:
-        trn_transform_list.append(transforms.RandomResizedCrop(crop))
+        if 'cifar' in ds_name.lower():
+            trn_transform_list.append(transforms.RandomCrop(crop))
+        else:
+            trn_transform_list.append(transforms.RandomResizedCrop(crop))
         tst_transform_list.append(transforms.CenterCrop(crop))
 
     # flips
