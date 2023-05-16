@@ -192,7 +192,7 @@ class Appr(Inc_Learning_Appr):
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
         model.fc = nn.Identity()
         self.model.bbs[t] = model
-        torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
+        # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
 
     @torch.no_grad()
     def _choose_backbone_to_finetune(self, t, trn_loader, val_loader):
@@ -319,7 +319,7 @@ class Appr(Inc_Learning_Appr):
 
         model.fc = nn.Identity()
         self.model.bbs[bb_to_finetune] = model
-        torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
+        # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         return old_model
 
     def _drift_compensation(self, bb_finetuned, trn_loader, val_loader, old_model):
