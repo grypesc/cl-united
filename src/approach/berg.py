@@ -75,7 +75,7 @@ class Appr(Inc_Learning_Appr):
                             help='Expert selection strategy for fine-tuning',
                             type=str,
                             choices=["robin", "random", "softmax", "kl-max", "kl-min"],
-                            default="softmax")
+                            default="kl-max")
         parser.add_argument('--initialization-strategy',
                             help='How to initialize experts weight',
                             type=str,
