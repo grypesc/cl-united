@@ -35,7 +35,7 @@ class Appr(Inc_Learning_Appr):
         self.model = resnet32()
         self.model.fc = nn.Identity()
         self.model.to(device)
-        self.data_loaders = []
+        self.train_data_loaders, self.val_data_loaders = [], []
         self.prototypes = {}
         self.task_offset = [0]
         self.classes_in_tasks = []
@@ -63,14 +63,17 @@ class Appr(Inc_Learning_Appr):
     def train_loop(self, t, trn_loader, val_loader):
         num_classes_in_t = len(np.unique(trn_loader.dataset.labels))
         self.classes_in_tasks.append(num_classes_in_t)
-        self.data_loaders.extend([trn_loader, val_loader])
+        self.train_data_loaders.extend([trn_loader])
+        self.val_data_loaders.extend([val_loader])
         self.old_model = copy.deepcopy(self.model)
         self.old_model.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
-
+        print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         if t > 0:
+            print("### Adapting prototypes ###")
             self.adapt_prototypes(t, trn_loader, val_loader, num_classes_in_t)
+        print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
 
 
@@ -171,6 +174,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Sequential(nn.Linear(self.S, self.S))
         adapter.to(self.device)
         optimizer, lr_scheduler = self.get_adapter_optimizer()
+        old_prototypes = copy.deepcopy(self.prototypes)
         for epoch in range(self.nepochs):
             adapter.train()
             train_loss, valid_loss = [], []
@@ -208,8 +212,35 @@ class Appr(Inc_Learning_Appr):
             for c, prototype in self.prototypes.items():
                 self.prototypes[c] = adapter(prototype)
 
+            # Evaluation
+            for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
+                old_dist, new_dist = [], []
+                class_images = np.concatenate([dl.dataset.images for dl in loaders])
+                labels = np.concatenate([dl.dataset.labels for dl in loaders])
 
+                for c in list(old_prototypes.keys()):
+                    train_indices = torch.tensor(labels) == c
+                    ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
+                    loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+                    from_ = 0
+                    class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+                    for images in loader:
+                        bsz = images.shape[0]
+                        images = images.to(self.device)
+                        features = self.model(images)
+                        class_features[from_: from_+bsz] = features
+                        features = self.model(torch.flip(images, dims=(3,)))
+                        class_features[from_+bsz: from_+2*bsz] = features
+                        from_ += 2*bsz
 
+                    # Calculate distance to old prototype
+                    old_dist.append(torch.cdist(class_features, old_prototypes[c].unsqueeze(0)).mean())
+                    new_dist.append(torch.cdist(class_features, self.prototypes[c].unsqueeze(0)).mean())
+
+                old_dist = torch.stack(old_dist)
+                new_dist = torch.stack(new_dist)
+                print(f"Old {subset} distance: {old_dist.mean():.2f} ± {old_dist.std():.2f}")
+                print(f"New {subset} distance: {new_dist.mean():.2f} ± {new_dist.std():.2f}")
 
 
     @torch.no_grad()
@@ -255,6 +286,6 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, milestones=[30, 60, 90]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, weight_decay=1e-5, momentum=0.9)
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, weight_decay=0, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
