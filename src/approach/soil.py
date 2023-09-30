@@ -7,11 +7,10 @@ from argparse import ArgumentParser
 from itertools import compress
 from torch import nn
 from torch.utils.data import Dataset
-from torch.distributions import MultivariateNormal
 from torchmetrics import Accuracy
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
-from src.networks.resnet32 import resnet32
+from .models.resnet32 import resnet32
 from .incremental_learning import Inc_Learning_Appr
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -32,7 +31,7 @@ class Appr(Inc_Learning_Appr):
         self.alpha = alpha
         self.patience = patience
         self.old_model = None
-        self.model = resnet32()
+        self.model = resnet32(num_features=S)
         self.model.fc = nn.Identity()
         self.model.to(device)
         self.train_data_loaders, self.val_data_loaders = [], []
@@ -54,6 +53,10 @@ class Appr(Inc_Learning_Appr):
                             help='number of learners sampled for task',
                             type=int,
                             default=3)
+        parser.add_argument('--S',
+                            help='leatent space size',
+                            type=int,
+                            default=64)
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
