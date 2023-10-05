@@ -20,7 +20,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, alpha=1.0):
+                 logger=None, N=10, K=3, S=64, alpha=1.0, adapt=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -28,6 +28,7 @@ class Appr(Inc_Learning_Appr):
         self.N = N
         self.K = K
         self.S = S
+        self.adapt = adapt
         self.alpha = alpha
         self.patience = patience
         self.old_model = None
@@ -61,6 +62,10 @@ class Appr(Inc_Learning_Appr):
                             help='relative weight of kd loss',
                             type=float,
                             default=1.0)
+        parser.add_argument('--adapt',
+                            help='Adapt prototypes',
+                            action='store_true',
+                            default=False)
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
@@ -74,7 +79,7 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        if t > 0:
+        if t > 0 and self.adapt:
             print("### Adapting prototypes ###")
             self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
