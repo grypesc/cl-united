@@ -64,6 +64,8 @@ class Appr(Inc_Learning_Appr):
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
+        if t > 4:
+            exit(0)
         num_classes_in_t = len(np.unique(trn_loader.dataset.labels))
         self.classes_in_tasks.append(num_classes_in_t)
         self.train_data_loaders.extend([trn_loader])
@@ -73,13 +75,12 @@ class Appr(Inc_Learning_Appr):
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
+        # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         if t > 0:
             print("### Adapting prototypes ###")
-            self.adapt_prototypes(t, trn_loader, val_loader, num_classes_in_t)
+            self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
-        if t > 4:
-            exit(0)
 
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -174,11 +175,13 @@ class Appr(Inc_Learning_Appr):
             self.prototypes[c] = centroid
 
 
-    def adapt_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
+    def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
+        self.old_model.eval()
+        # adapter = nn.Sequential(nn.Linear(self.S, 256), nn.ReLU(), nn.Linear(256, self.S))
         adapter = nn.Sequential(nn.Linear(self.S, self.S))
         adapter.to(self.device)
-        optimizer, lr_scheduler = self.get_adapter_optimizer()
+        optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_prototypes = copy.deepcopy(self.prototypes)
         for epoch in range(self.nepochs):
             adapter.train()
@@ -290,8 +293,8 @@ class Appr(Inc_Learning_Appr):
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
-    def get_adapter_optimizer(self, milestones=[30, 60, 90]):
+    def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001, weight_decay=0, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.001, weight_decay=0, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
