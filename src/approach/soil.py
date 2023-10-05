@@ -88,7 +88,9 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         head = nn.Linear(self.S, num_classes_in_t)
         head.to(self.device)
-        optimizer, lr_scheduler = self.get_optimizer(self.wd)
+        # distiller = nn.Linear(self.S, self.S)
+        parameters = list(self.model.parameters()) + list(head.parameters()) # + list(distiller.parameters())
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
@@ -281,15 +283,16 @@ class Appr(Inc_Learning_Appr):
     def criterion(self, t, outputs, targets, features, old_features=None):
         """Returns the loss value"""
         ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
-        if old_features is not None:  # Knowledge distillation loss on features
-            kd_loss = nn.functional.mse_loss(features, old_features)
-            total_loss = (1 - self.alpha) * ce_loss + self.alpha * kd_loss
-            return total_loss
-        return ce_loss
+        if old_features is None:
+            return ce_loss
+        kd_loss = nn.functional.mse_loss(features, old_features)
+        total_loss = (1 - self.alpha) * ce_loss + self.alpha * kd_loss
+        return total_loss
 
-    def get_optimizer(self, wd, milestones=[30, 60, 90]):
+
+    def get_optimizer(self, parameters, wd, milestones=[30, 60, 90]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr, weight_decay=wd, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
