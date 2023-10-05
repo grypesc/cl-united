@@ -78,6 +78,8 @@ class Appr(Inc_Learning_Appr):
             self.adapt_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
+        if t > 4:
+            exit(0)
 
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -185,8 +187,9 @@ class Appr(Inc_Learning_Appr):
                 bsz = images.shape[0]
                 images = images.to(self.device)
                 optimizer.zero_grad()
-                target = self.model(images)
-                old_features = self.old_model(images)
+                with torch.no_grad():
+                    target = self.model(images)
+                    old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
@@ -289,6 +292,6 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, milestones=[30, 60, 90]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, weight_decay=0, momentum=0.9)
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.001, weight_decay=0, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
