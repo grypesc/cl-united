@@ -91,13 +91,16 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         head = nn.Linear(self.S, num_classes_in_t)
         head.to(self.device)
-        # distiller = nn.Linear(self.S, self.S)
-        parameters = list(self.model.parameters()) + list(head.parameters()) # + list(distiller.parameters())
+        distiller = nn.Linear(self.S, self.S)
+        distiller.to(self.device)
+        parameters = list(self.model.parameters()) + list(head.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
+            head.train()
+            distiller.train()
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
@@ -109,7 +112,7 @@ class Appr(Inc_Learning_Appr):
                     with torch.no_grad():
                         old_features = self.old_model(images)
                 out = head(features)
-                loss = self.criterion(t, out, targets, features, old_features)
+                loss = self.criterion(t, out, targets, distiller(features), old_features)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
                 optimizer.step()
@@ -118,6 +121,8 @@ class Appr(Inc_Learning_Appr):
             lr_scheduler.step()
 
             self.model.eval()
+            head.eval()
+            distiller.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
