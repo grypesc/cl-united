@@ -20,15 +20,12 @@ def softmax_temperature(x, dim, tau=1.0):
 
 
 class FeatureAdaptator(nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim):
+    def __init__(self, in_dim, out_dim):
         super().__init__()
-        self.linear1 = nn.Linear(in_dim, hidden_dim)
-        self.activation = nn.GELU()
-        self.out = nn.Linear(hidden_dim, out_dim)
+        self.linear1 = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
-        x = self.activation(self.linear1(x))
-        return self.out(x)
+        return self.linear1(x)
 
 
 class Appr(Inc_Learning_Appr):
@@ -37,7 +34,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
-                 initialization_strategy="first", remove_outliers=False, compensate_drifts=False):
+                 initialization_strategy="first", compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -52,7 +49,6 @@ class Appr(Inc_Learning_Appr):
         self.ft_selection_strategy = ft_selection_strategy
         self.ftepochs = ftepochs
         self.ftwd = ftwd
-        self.remove_outliers = remove_outliers
         self.compensate_drifts = compensate_drifts
         self.model.to(device)
         self.experts_distributions = []
@@ -92,7 +88,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--use-multivariate',
                             help='Use multivariate distribution',
                             action='store_true',
-                            default=False)
+                            default=True)
         parser.add_argument('--use-nmc',
                             help='Use nearest mean classifier instead of bayes',
                             action='store_true',
@@ -100,15 +96,11 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=1.0)
+                            default=0.9)
         parser.add_argument('--tau',
                             help='gumbel softmax temperature',
                             type=float,
                             default=3.0)
-        parser.add_argument('--remove-outliers',
-                            help='Remove class outliers before creating distribution',
-                            action='store_true',
-                            default=False)
         parser.add_argument('--compensate-drifts',
                             help='Drift compensation using MLP feature adaptation',
                             action='store_true',
@@ -324,10 +316,10 @@ class Appr(Inc_Learning_Appr):
 
     def _drift_compensation(self, bb_finetuned, trn_loader, val_loader, old_model):
         """ Train MLP that predicts drifts and use it to update means of old distributions """
-        feature_adaptator = FeatureAdaptator(self.model.num_features, 256, self.model.num_features)
+        feature_adaptator = FeatureAdaptator(self.model.num_features, self.model.num_features)
         feature_adaptator.to(self.device)
-        optimizer = torch.optim.SGD(feature_adaptator.parameters(), lr=1e-1, weight_decay=1e-3, momentum=self.momentum)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[50, 80], gamma=0.1)
+        optimizer = torch.optim.SGD(feature_adaptator.parameters(), lr=1e-1, weight_decay=1e-5, momentum=0.9)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[30, 60, 90], gamma=0.1)
         model = self.model.bbs[bb_finetuned]
         model.eval()
         for epoch in range(100):
@@ -338,10 +330,9 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = old_model(images)
                     new_features = model(images)
-                    target_drift = new_features - old_features
                 optimizer.zero_grad()
-                pred_drift = feature_adaptator(old_features)
-                loss = nn.functional.mse_loss(pred_drift, target_drift)
+                pred_features = feature_adaptator(old_features)
+                loss = nn.functional.mse_loss(pred_features, new_features)
                 loss.backward()
                 optimizer.step()
                 train_losses.append(float(loss))
@@ -352,9 +343,8 @@ class Appr(Inc_Learning_Appr):
                     images = images.to(self.device)
                     old_features = old_model(images)
                     new_features = model(images)
-                    target_drift = new_features - old_features
-                    pred_drift = feature_adaptator(old_features)
-                    loss = nn.functional.mse_loss(pred_drift, target_drift)
+                    pred_features = feature_adaptator(old_features)
+                    loss = nn.functional.mse_loss(pred_features, new_features)
                     val_losses.append(loss)
 
             train_loss = sum(train_losses) / len(trn_loader.dataset)
@@ -364,9 +354,9 @@ class Appr(Inc_Learning_Appr):
         with torch.no_grad():
             feature_adaptator.eval()
             means = torch.stack([d.mu.data[0][0] for d in self.experts_distributions[bb_finetuned]])
-            drifts = feature_adaptator(means)
+            new_means = feature_adaptator(means)
             for i, d in enumerate(self.experts_distributions[bb_finetuned]):
-                d.mu.data[0, 0] += drifts[i]
+                d.mu.data[0, 0] = new_means[i]
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader):
@@ -381,16 +371,11 @@ class Appr(Inc_Learning_Appr):
             for c in range(classes):
                 c = c + self.model.task_offset[t]
                 train_indices = torch.tensor(trn_loader.dataset.labels) == c
-                # Uncomment to add valid set to distributions
-                # val_indices = torch.tensor(val_loader.dataset.labels) == c
                 if isinstance(trn_loader.dataset.images, list):
                     train_images = list(compress(trn_loader.dataset.images, train_indices))
                     ds = ClassDirectoryDataset(train_images, transforms)
-                    # val_images = list(compress(val_loader.dataset.images, val_indices))
-                    # ds = ClassDirectoryDataset(train_images + val_images, transforms)
                 else:
                     ds = trn_loader.dataset.images[train_indices]
-                    # ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
                     ds = ClassMemoryDataset(ds, transforms)
                 loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
                 from_ = 0
@@ -404,11 +389,11 @@ class Appr(Inc_Learning_Appr):
                     class_features[from_+bsz: from_+2*bsz] = features
                     from_ += 2*bsz
 
-                if self.remove_outliers:
-                    median = torch.median(class_features, dim=0)[0]
-                    dist = torch.cdist(class_features, median.unsqueeze(0), p=2).squeeze(1)
-                    not_outliers = torch.topk(dist, int(0.99*class_features.shape[0]), largest=False, sorted=False)[1]
-                    class_features = class_features[not_outliers]
+                # if self.remove_outliers:
+                #     median = torch.median(class_features, dim=0)[0]
+                #     dist = torch.cdist(class_features, median.unsqueeze(0), p=2).squeeze(1)
+                #     not_outliers = torch.topk(dist, int(0.99*class_features.shape[0]), largest=False, sorted=False)[1]
+                #     class_features = class_features[not_outliers]
 
                 # Calculate distributions
                 cov_type = "full" if self.use_multivariate else "diag"
