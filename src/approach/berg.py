@@ -33,7 +33,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, shared=0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
                  initialization_strategy="first", compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -52,7 +52,15 @@ class Appr(Inc_Learning_Appr):
         self.compensate_drifts = compensate_drifts
         self.model.to(device)
         self.experts_distributions = []
-        self.shared_layers = [] # ["conv1.weight", "bn1.weight", "bn1.bias"]
+        if shared > 0:
+            self.shared_layers = ["conv1_starting.weight", "bn1_starting.weight", "bn1_starting.bias", "layer1"]
+            if shared > 1:
+                self.shared_layers.append("layer2")
+                if shared > 2:
+                    self.shared_layers.append("layer3")
+                    if shared > 3:
+                        self.shared_layers.append("layer4")
+
         self.initialization_strategy = initialization_strategy
 
     @staticmethod
@@ -67,6 +75,10 @@ class Appr(Inc_Learning_Appr):
                             help='Number of gaussian models in the mixture',
                             type=int,
                             default=1)
+        parser.add_argument('--shared',
+                            help='Number of shared blocks',
+                            type=int,
+                            default=0)
         parser.add_argument('--ft-selection-strategy',
                             help='Expert selection strategy for fine-tuning',
                             type=str,
@@ -137,9 +149,11 @@ class Appr(Inc_Learning_Appr):
         else:
             for name, param in model.named_parameters():
                 param.requires_grad = True
-                if name in self.shared_layers:
-                    model.get_parameter(name).data = self.model.bbs[0].get_parameter(name).data
-                    param.requires_grad = False
+                for layer_not_to_train in self.shared_layers:
+                    if layer_not_to_train in name:
+                        model.get_parameter(name).data = self.model.bbs[0].get_parameter(name).data
+                        param.requires_grad = False
+
         print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
 
@@ -189,7 +203,7 @@ class Appr(Inc_Learning_Appr):
     @torch.no_grad()
     def _choose_backbone_to_finetune(self, t, trn_loader, val_loader):
         if self.ft_selection_strategy == "robin":
-            return t % self.max_experts
+            return self.max_experts - 1 - t % self.max_experts
         if self.ft_selection_strategy == "random":
             return random.randint(0, self.max_experts-1)
         if "kl-" in self.ft_selection_strategy:
@@ -255,8 +269,9 @@ class Appr(Inc_Learning_Appr):
         model = self.model.bbs[bb_to_finetune]
         for name, param in model.named_parameters():
             param.requires_grad = True
-            if name in self.shared_layers:
-                param.requires_grad = False
+            for layer_not_to_train in self.shared_layers:
+                if layer_not_to_train in name:
+                    param.requires_grad = False
         model.fc = nn.Linear(self.model.num_features, self.model.taskcla[t][1])
         model.to(self.device)
         print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')

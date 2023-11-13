@@ -86,8 +86,8 @@ class ResNet(nn.Module):
     def __init__(self, block, layers, num_classes=10, num_features=64):
         self.inplanes = 16
         super(ResNet, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(16)
+        self.conv1_starting = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1_starting = nn.BatchNorm2d(16)
         self.relu = nn.ReLU(inplace=True)
         self.layer1 = self._make_layer(block, 16, layers[0])
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
@@ -119,7 +119,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x, return_features=False):
-        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn1_starting(self.conv1_starting(x)))
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
