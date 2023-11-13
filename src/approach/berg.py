@@ -52,6 +52,7 @@ class Appr(Inc_Learning_Appr):
         self.compensate_drifts = compensate_drifts
         self.model.to(device)
         self.experts_distributions = []
+        self.shared_layers = []
         if shared > 0:
             self.shared_layers = ["conv1_starting.weight", "bn1_starting.weight", "bn1_starting.bias", "layer1"]
             if shared > 1:
