@@ -135,7 +135,7 @@ def main(argv=None):
     ####################################################################################################################
 
     # Args -- Network
-    from networks.network import LLL_Net, Extractor, ExtractorEnsemble
+    from networks.network import LLL_Net, ExtractorEnsemble
     if args.network in tvmodels:  # torchvision models
         tvnet = getattr(importlib.import_module(name='torchvision.models'), args.network)
         if args.network == 'googlenet':
@@ -210,9 +210,7 @@ def main(argv=None):
 
     # Network and Approach instances
     utils.seed_everything(seed=args.seed)
-    if args.approach == "mvgb":
-        net = Extractor(init_model, taskcla, args.network, device)
-    elif args.approach == "berg":
+    if args.approach == "berg":
         net = ExtractorEnsemble(init_model, taskcla, args.network, device)
     else:
         net = LLL_Net(init_model, taskcla, remove_existing_head=not args.keep_existing_head)

@@ -1,10 +1,7 @@
-import copy
-
 import torch
 from torch import nn
 from copy import deepcopy
 
-# from torchvision.models import resnet18
 from .resnet32_linear_turbo import resnet32
 from .resnet_linear_turbo import resnet18, resnet34, resnet50
 from .resnet32_linear_bottleneck import resnet20
@@ -101,58 +98,6 @@ class LLL_Net(nn.Module):
         """Initialize weights using different strategies"""
         # TODO: add different initialization strategies
         pass
-
-
-class Extractor(LLL_Net):
-
-    def __init__(self, backbone, taskcla, network_type, device):
-        super().__init__(backbone, remove_existing_head=False)
-        self.model = None
-        self.num_features = 64
-        if network_type == "resnet18":
-            self.bb = resnet18(num_classes=taskcla[0][1])
-            self.num_features = 128
-        elif network_type == "resnet34":
-            self.bb = resnet34(num_classes=taskcla[0][1])
-            self.num_features = 128
-        elif network_type == "resnet50":
-            self.bb = resnet50(num_classes=taskcla[0][1])
-            self.num_features = 128
-        elif network_type == "resnet32":
-            self.bb = resnet32(num_classes=taskcla[0][1])
-        else:
-            print("This network is not supported by MVGB, using resnet32.")
-            self.bb = resnet32(num_classes=taskcla[0][1])
-
-        # state_dict = torch.load("networks/best2.pth")
-        # self.bb.load_state_dict(state_dict, strict=False)
-        # self.bb.fc = nn.Identity()
-        for param in self.bb.parameters():
-            param.requires_grad = True
-        self.head = nn.Identity()
-
-        self.task_offset = [0]
-        self.taskcla = taskcla
-        self.device = device
-        self.task_distributions = []
-
-    def add_head(self, num_outputs):
-        pass
-
-    def replace_head(self, num_outputs):
-        """ Replace the head with new one."""
-        self.head = nn.Sequential(nn.Linear(64, 256, bias=False), nn.ReLU(), nn.Linear(256, num_outputs, bias=False))
-
-    def forward(self, x, return_features=False):
-        features = self.bb(x)
-        if return_features:
-            return self.head(features), features
-        return self.head(features)
-
-    def freeze_backbone(self):
-        """Freeze all parameters from the main model, but not the heads"""
-        for param in self.bb.parameters():
-            param.requires_grad = False
 
 
 class ExtractorEnsemble(LLL_Net):

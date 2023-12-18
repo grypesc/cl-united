@@ -33,7 +33,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, ftepochs=100, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=10000,
                  momentum=0, wd=0, ftwd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, shared=0, use_multivariate=False, use_nmc=False, ft_selection_strategy="softmax",
+                 logger=None, max_experts=999, gmms=1, alpha=1.0, tau=3.0, shared=0, use_multivariate=False, use_nmc=False,
                  initialization_strategy="first", compensate_drifts=False):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -46,7 +46,6 @@ class Appr(Inc_Learning_Appr):
         self.patience = patience
         self.use_multivariate = use_multivariate
         self.use_nmc = use_nmc
-        self.ft_selection_strategy = ft_selection_strategy
         self.ftepochs = ftepochs
         self.ftwd = ftwd
         self.compensate_drifts = compensate_drifts
@@ -80,11 +79,6 @@ class Appr(Inc_Learning_Appr):
                             help='Number of shared blocks',
                             type=int,
                             default=0)
-        parser.add_argument('--ft-selection-strategy',
-                            help='Expert selection strategy for fine-tuning',
-                            type=str,
-                            choices=["robin", "random", "softmax", "kl-max", "kl-min"],
-                            default="kl-max")
         parser.add_argument('--initialization-strategy',
                             help='How to initialize experts weight',
                             type=str,
@@ -109,9 +103,9 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=0.9)
+                            default=0.99)
         parser.add_argument('--tau',
-                            help='gumbel softmax temperature',
+                            help='softmax temperature',
                             type=float,
                             default=3.0)
         parser.add_argument('--compensate-drifts',
@@ -129,10 +123,10 @@ class Appr(Inc_Learning_Appr):
         if t >= self.max_experts:
             bb_to_finetune = self._choose_backbone_to_finetune(t, trn_loader, val_loader)
             print(f"Finetuning backbone {bb_to_finetune} on task {t}:")
-            old_model = self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
-            if self.compensate_drifts:
-                print("Drift compensation:")
-                self._drift_compensation(bb_to_finetune, trn_loader, val_loader, old_model)
+            self.finetune_backbone(t, bb_to_finetune, trn_loader, val_loader)
+            # if self.compensate_drifts:
+            #     print("Drift compensation:")
+            #     self._drift_compensation(bb_to_finetune, trn_loader, val_loader, old_model)
 
         print(f"Creating distributions for task {t}:")
         self.create_distributions(t, trn_loader, val_loader)
@@ -203,64 +197,26 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def _choose_backbone_to_finetune(self, t, trn_loader, val_loader):
-        if self.ft_selection_strategy == "robin":
-            return self.max_experts - 1 - t % self.max_experts
-        if self.ft_selection_strategy == "random":
-            return random.randint(0, self.max_experts-1)
-        if "kl-" in self.ft_selection_strategy:
-            # Perform expert selection based on KL divergence between old and new distributions
-            print(f"Creating distributions #2 for task {t}:")
-            self.create_distributions(t, trn_loader, val_loader)
-            expert_overlap = torch.zeros(self.max_experts, device=self.device)
-            for bb_num in range(self.max_experts):
-                classes_in_t = self.model.taskcla[t][1]
-                new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
-                kl_matrix = torch.zeros((len(new_distributions), len(new_distributions)), device=self.device)
-                for o, old_gauss_ in enumerate(new_distributions):
-                    old_gauss = MultivariateNormal(old_gauss_.mu.data[0][0], covariance_matrix=old_gauss_.var.data[0][0])
-                    for n, new_gauss_ in enumerate(new_distributions):
-                        new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
-                        kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
-                expert_overlap[bb_num] = torch.mean(kl_matrix)
-                self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
-            print(f"Expert overlap:{expert_overlap}")
-            if self.ft_selection_strategy == "kl-min":
-                bb_to_finetune = torch.argmin(expert_overlap)
-            else:
-                bb_to_finetune = torch.argmax(expert_overlap)
-            self.model.task_offset = self.model.task_offset[:-1]
-            return int(bb_to_finetune)
+        self.create_distributions(t, trn_loader, val_loader)
+        expert_overlap = torch.zeros(self.max_experts, device=self.device)
+        for bb_num in range(self.max_experts):
+            classes_in_t = self.model.taskcla[t][1]
+            new_distributions = self.experts_distributions[bb_num][-classes_in_t:]
+            kl_matrix = torch.zeros((len(new_distributions), len(new_distributions)), device=self.device)
+            for o, old_gauss_ in enumerate(new_distributions):
+                old_gauss = MultivariateNormal(old_gauss_.mu.data[0][0], covariance_matrix=old_gauss_.var.data[0][0])
+                for n, new_gauss_ in enumerate(new_distributions):
+                    new_gauss = MultivariateNormal(new_gauss_.mu.data[0][0], covariance_matrix=new_gauss_.var.data[0][0])
+                    kl_matrix[n, o] = torch.distributions.kl_divergence(new_gauss, old_gauss)
+            expert_overlap[bb_num] = torch.mean(kl_matrix)
+            self.experts_distributions[bb_num] = self.experts_distributions[bb_num][:-classes_in_t]
+        print(f"Expert overlap:{expert_overlap}")
+        bb_to_finetune = torch.argmax(expert_overlap)
+        self.model.task_offset = self.model.task_offset[:-1]
+        return int(bb_to_finetune)
 
-        if self.ft_selection_strategy == "softmax":
-            # Perform expert selection based on new samples overlapping with old distributions
-            trn_loader = copy.deepcopy(trn_loader)
-            trn_loader.dataset.transform = val_loader.dataset.transform
-            self.model.eval()
-            expert_scores = torch.zeros((self.max_experts, ), device=self.device)
-            for bb_num in range(self.max_experts):
-                distributions = self.experts_distributions[bb_num]
-                model = self.model.bbs[bb_num]
-                scores = []
-                for images, _ in trn_loader:
-                    bsz = images.shape[0]
-                    images = images.to(self.device)
-                    features = model(images)
-                    features_flipped = model(torch.flip(images, dims=(3,)))
-                    features = torch.cat((features, features_flipped), dim=0)
-                    log_likelihoods = torch.zeros((2*bsz, len(distributions)), device=self.device)
-                    for c, class_gmm in enumerate(distributions):
-                        log_likelihoods[:, c] = class_gmm.score_samples(features)
-                    log_likelihoods = softmax_temperature(log_likelihoods, dim=1, tau=self.tau)
-                    max_hoods, _ = torch.max(log_likelihoods, dim=1)
-                    scores.append(max_hoods)
-                scores = torch.cat(scores, dim=0)
-                expert_scores[bb_num] = torch.mean(scores)
-            print(f"Expert scores: {expert_scores}")
-            bb_to_finetune = torch.argmin(expert_scores)
-            return int(bb_to_finetune)
 
     def finetune_backbone(self, t, bb_to_finetune, trn_loader, val_loader):
-        """ This time use knowledge distillation to not let old distributions to drift too much """
 
         old_model = copy.deepcopy(self.model.bbs[bb_to_finetune])
         for name, param in old_model.named_parameters():
@@ -330,49 +286,49 @@ class Appr(Inc_Learning_Appr):
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         return old_model
 
-    def _drift_compensation(self, bb_finetuned, trn_loader, val_loader, old_model):
-        """ Train MLP that predicts drifts and use it to update means of old distributions """
-        feature_adaptator = FeatureAdaptator(self.model.num_features, self.model.num_features)
-        feature_adaptator.to(self.device)
-        optimizer = torch.optim.SGD(feature_adaptator.parameters(), lr=1e-1, weight_decay=1e-5, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[30, 60, 90], gamma=0.1)
-        model = self.model.bbs[bb_finetuned]
-        model.eval()
-        for epoch in range(100):
-            train_losses, val_losses = [], []
-            feature_adaptator.train()
-            for images, _ in trn_loader:
-                images = images.to(self.device)
-                with torch.no_grad():
-                    old_features = old_model(images)
-                    new_features = model(images)
-                optimizer.zero_grad()
-                pred_features = feature_adaptator(old_features)
-                loss = nn.functional.mse_loss(pred_features, new_features)
-                loss.backward()
-                optimizer.step()
-                train_losses.append(float(loss))
-            scheduler.step()
-            feature_adaptator.eval()
-            with torch.no_grad():
-                for images, _ in val_loader:
-                    images = images.to(self.device)
-                    old_features = old_model(images)
-                    new_features = model(images)
-                    pred_features = feature_adaptator(old_features)
-                    loss = nn.functional.mse_loss(pred_features, new_features)
-                    val_losses.append(loss)
-
-            train_loss = sum(train_losses) / len(trn_loader.dataset)
-            valid_loss = sum(val_losses) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {1e3*train_loss:.2f} Val loss: {1e3*valid_loss:.2f} ")
-
-        with torch.no_grad():
-            feature_adaptator.eval()
-            means = torch.stack([d.mu.data[0][0] for d in self.experts_distributions[bb_finetuned]])
-            new_means = feature_adaptator(means)
-            for i, d in enumerate(self.experts_distributions[bb_finetuned]):
-                d.mu.data[0, 0] = new_means[i]
+    # def _drift_compensation(self, bb_finetuned, trn_loader, val_loader, old_model):
+    #     """ Train MLP that predicts drifts and use it to update means of old distributions """
+    #     feature_adaptator = FeatureAdaptator(self.model.num_features, self.model.num_features)
+    #     feature_adaptator.to(self.device)
+    #     optimizer = torch.optim.SGD(feature_adaptator.parameters(), lr=1e-1, weight_decay=1e-5, momentum=0.9)
+    #     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[30, 60, 90], gamma=0.1)
+    #     model = self.model.bbs[bb_finetuned]
+    #     model.eval()
+    #     for epoch in range(100):
+    #         train_losses, val_losses = [], []
+    #         feature_adaptator.train()
+    #         for images, _ in trn_loader:
+    #             images = images.to(self.device)
+    #             with torch.no_grad():
+    #                 old_features = old_model(images)
+    #                 new_features = model(images)
+    #             optimizer.zero_grad()
+    #             pred_features = feature_adaptator(old_features)
+    #             loss = nn.functional.mse_loss(pred_features, new_features)
+    #             loss.backward()
+    #             optimizer.step()
+    #             train_losses.append(float(loss))
+    #         scheduler.step()
+    #         feature_adaptator.eval()
+    #         with torch.no_grad():
+    #             for images, _ in val_loader:
+    #                 images = images.to(self.device)
+    #                 old_features = old_model(images)
+    #                 new_features = model(images)
+    #                 pred_features = feature_adaptator(old_features)
+    #                 loss = nn.functional.mse_loss(pred_features, new_features)
+    #                 val_losses.append(loss)
+    #
+    #         train_loss = sum(train_losses) / len(trn_loader.dataset)
+    #         valid_loss = sum(val_losses) / len(val_loader.dataset)
+    #         print(f"Epoch: {epoch} Train loss: {1e3*train_loss:.2f} Val loss: {1e3*valid_loss:.2f} ")
+    #
+    #     with torch.no_grad():
+    #         feature_adaptator.eval()
+    #         means = torch.stack([d.mu.data[0][0] for d in self.experts_distributions[bb_finetuned]])
+    #         new_means = feature_adaptator(means)
+    #         for i, d in enumerate(self.experts_distributions[bb_finetuned]):
+    #             d.mu.data[0, 0] = new_means[i]
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader):
