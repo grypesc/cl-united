@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
-from .models.resnet32 import resnet32
+from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -20,7 +20,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, alpha=1.0, adapt=False):
+                 logger=None, N=10, K=3, S=64, alpha=1.0, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -32,7 +32,11 @@ class Appr(Inc_Learning_Appr):
         self.alpha = alpha
         self.patience = patience
         self.old_model = None
-        self.model = resnet32(num_features=S)
+        str_to_model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
+                        "resnet14": resnet14(num_features=S, activation_function=activation_function),
+                        "resnet20": resnet20(num_features=S, activation_function=activation_function),
+                        "resnet32": resnet32(num_features=S, activation_function=activation_function)}
+        self.model = str_to_model[nnet]
         self.model.fc = nn.Identity()
         self.model.to(device)
         self.train_data_loaders, self.val_data_loaders = [], []
@@ -55,7 +59,7 @@ class Appr(Inc_Learning_Appr):
                             type=int,
                             default=3)
         parser.add_argument('--S',
-                            help='leatent space size',
+                            help='latent space size',
                             type=int,
                             default=64)
         parser.add_argument('--alpha',
@@ -66,6 +70,15 @@ class Appr(Inc_Learning_Appr):
                             help='Adapt prototypes',
                             action='store_true',
                             default=False)
+        parser.add_argument('--activation-function',
+                            help='Activation functions in resnet',
+                            type=str,
+                            choices=["identity", "relu", "lrelu"],
+                            default="relu")
+        parser.add_argument('--nnet',
+                            type=str,
+                            choices=["resnet8", "resnet14", "resnet20", "resnet32"],
+                            default="resnet32")
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
@@ -94,7 +107,7 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         distiller.to(self.device)
         parameters = list(self.model.parameters()) + list(head.parameters()) + list(distiller.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
@@ -107,6 +120,8 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
                 features = self.model(images)
+                if epoch < 3:
+                    features = features.detach()
                 old_features = None
                 if t > 0:
                     with torch.no_grad():
@@ -180,7 +195,7 @@ class Appr(Inc_Learning_Appr):
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
-            # Calculate prototype
+            # Calculate centroid
             centroid = class_features.mean(dim=0)
             self.prototypes[c] = centroid
 
@@ -206,7 +221,7 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(adapter.parameters(), self.clipgrad)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step()
@@ -226,6 +241,7 @@ class Appr(Inc_Learning_Appr):
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
 
+        # Calculate new prototypes
         with torch.no_grad():
             adapter.eval()
             for c, prototype in self.prototypes.items():
@@ -264,7 +280,7 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def eval(self, t, val_loader):
-        """ Perform nearest mean classification based on distance to prototypes """
+        """ Perform nearest centroids classification """
         self.model.eval()
         prototypes = torch.stack(list(self.prototypes.values()))
         tag_acc = Accuracy("multiclass", num_classes=prototypes.shape[0])
@@ -306,6 +322,6 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.001, weight_decay=0, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-6, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
