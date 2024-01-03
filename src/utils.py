@@ -32,5 +32,8 @@ def print_summary(acc_taw, acc_tag, forg_taw, forg_tag):
             avgs.append(avg)
         if "Acc" in name:
             print('Average incremental:{:5.1f}% \n'.format(np.mean(avgs)), end='')
+    print('*' * 108)
+    print(f"TAw plasticity: {100*np.mean(np.diag(acc_taw)[1:]):.2f}%")
+    print(f"TAg plasticity: {100*np.mean(np.diag(acc_tag)[1:]):.2f}%")
 
     print('*' * 108)
