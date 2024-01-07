@@ -20,7 +20,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, alpha=0.5, sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10, K=3, S=64, alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -30,6 +30,7 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.adapt = adapt
         self.alpha = alpha
+        self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
         str_to_model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
@@ -38,7 +39,7 @@ class Appr(Inc_Learning_Appr):
                         "resnet32": resnet32(num_features=S, activation_function=activation_function)}
         self.model = str_to_model[nnet]
         self.model.fc = nn.Identity()
-        self.model.to(device)
+        self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.prototypes = {}
         self.task_offset = [0]
@@ -80,6 +81,10 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["identity", "relu", "lrelu"],
                             default="relu")
+        parser.add_argument('--smoothing',
+                            help='label smoothing',
+                            type=float,
+                            default=0.0)
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32"],
@@ -110,9 +115,9 @@ class Appr(Inc_Learning_Appr):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         head = nn.Linear(self.S, num_classes_in_t)
-        head.to(self.device)
+        head.to(self.device, non_blocking=True)
         distiller = nn.Linear(self.S, self.S)
-        distiller.to(self.device)
+        distiller.to(self.device, non_blocking=True)
         parameters = list(self.model.parameters()) + list(head.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
         for epoch in range(self.nepochs):
@@ -124,10 +129,10 @@ class Appr(Inc_Learning_Appr):
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
-                images, targets = images.to(self.device), targets.to(self.device)
+                images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 1:
+                if epoch < 3:
                     features = features.detach()
                 old_features = None
                 if t > 0:
@@ -149,7 +154,7 @@ class Appr(Inc_Learning_Appr):
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
                     bsz = images.shape[0]
-                    images, targets = images.to(self.device), targets.to(self.device)
+                    images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     old_features = None
                     if t > 0:
@@ -195,7 +200,7 @@ class Appr(Inc_Learning_Appr):
             class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
             for images in loader:
                 bsz = images.shape[0]
-                images = images.to(self.device)
+                images = images.to(self.device, non_blocking=True)
                 features = model(images)
                 class_features[from_: from_+bsz] = features
                 features = model(torch.flip(images, dims=(3,)))
@@ -212,7 +217,7 @@ class Appr(Inc_Learning_Appr):
         self.old_model.eval()
         # adapter = nn.Sequential(nn.Linear(self.S, 256), nn.ReLU(), nn.Linear(256, self.S))
         adapter = nn.Sequential(nn.Linear(self.S, self.S))
-        adapter.to(self.device)
+        adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_prototypes = copy.deepcopy(self.prototypes)
         for epoch in range(self.nepochs):
@@ -220,7 +225,7 @@ class Appr(Inc_Learning_Appr):
             train_loss, valid_loss = [], []
             for images, _ in trn_loader:
                 bsz = images.shape[0]
-                images = images.to(self.device)
+                images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 with torch.no_grad():
                     target = self.model(images)
@@ -237,7 +242,7 @@ class Appr(Inc_Learning_Appr):
             with torch.no_grad():
                 for images, _ in val_loader:
                     bsz = images.shape[0]
-                    images = images.to(self.device)
+                    images = images.to(self.device, non_blocking=True)
                     target = self.model(images)
                     old_features = self.old_model(images)
                     adapted_features = adapter(old_features)
@@ -268,7 +273,7 @@ class Appr(Inc_Learning_Appr):
                     class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
                     for images in loader:
                         bsz = images.shape[0]
-                        images = images.to(self.device)
+                        images = images.to(self.device, non_blocking=True)
                         features = self.model(images)
                         class_features[from_: from_+bsz] = features
                         features = self.model(torch.flip(images, dims=(3,)))
@@ -294,7 +299,7 @@ class Appr(Inc_Learning_Appr):
         taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
         offset = self.task_offset[t]
         for images, target in val_loader:
-            images = images.to(self.device)
+            images = images.to(self.device, non_blocking=True)
             features = self.model(images)
             dist = torch.cdist(features, prototypes)
             tag_preds = torch.argmin(dist, dim=1)
@@ -308,7 +313,7 @@ class Appr(Inc_Learning_Appr):
 
     def criterion(self, t, outputs, targets, features, old_features=None):
         """Returns the loss value"""
-        ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=0.0)
+        ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=self.smoothing)
         if old_features is None:
             return ce_loss
         kd_loss = nn.functional.mse_loss(features, old_features)
