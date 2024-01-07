@@ -20,7 +20,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, alpha=0.5, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10, K=3, S=64, alpha=0.5, sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -43,7 +43,8 @@ class Appr(Inc_Learning_Appr):
         self.prototypes = {}
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.distance_metric = "L2"
+        self.sval_fraction = sval_fraction
+        self.svals_explained_by = []
 
 
     @staticmethod
@@ -66,6 +67,10 @@ class Appr(Inc_Learning_Appr):
                             help='relative weight of kd loss',
                             type=float,
                             default=0.5)
+        parser.add_argument('--sval-fraction',
+                            help='Fraction of eigenvalues sum that is explained',
+                            type=float,
+                            default=0.95)
         parser.add_argument('--adapt',
                             help='Adapt prototypes',
                             action='store_true',
@@ -97,6 +102,8 @@ class Appr(Inc_Learning_Appr):
             self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
+        self.check_singular_values(t, val_loader)
+        self.print_singular_values()
 
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -120,7 +127,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 3:
+                if epoch < 1:
                     features = features.detach()
                 old_features = None
                 if t > 0:
@@ -289,15 +296,10 @@ class Appr(Inc_Learning_Appr):
         for images, target in val_loader:
             images = images.to(self.device)
             features = self.model(images)
-            if self.distance_metric == "L2":
-                dist = torch.cdist(features, prototypes)
-                tag_preds = torch.argmin(dist, dim=1)
-                taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
-            else: # cosine
-                pass
-                # cos_sim = F.normalize(features) @ F.normalize(prototypes).T
-                # tag_preds = torch.argmax(cos_sim, dim=1)
-                # taw_preds = torch.argmax(cos_sim[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
+            dist = torch.cdist(features, prototypes)
+            tag_preds = torch.argmin(dist, dim=1)
+            taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
+
 
             tag_acc.update(tag_preds.cpu(), target)
             taw_acc.update(taw_preds.cpu(), target)
@@ -320,8 +322,37 @@ class Appr(Inc_Learning_Appr):
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
+
     def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
         """Returns the optimizer"""
         optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-6, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
+
+    @torch.no_grad()
+    def check_singular_values(self, t, val_loader):
+        self.model.eval()
+        self.svals_explained_by.append([])
+        for i, _ in enumerate(self.train_data_loaders):
+            ds = ClassMemoryDataset(self.train_data_loaders[i].dataset.images, val_loader.dataset.transform)
+            loader = torch.utils.data.DataLoader(ds, batch_size=256, num_workers=val_loader.num_workers, shuffle=False)
+            from_ = 0
+            class_features = torch.full((len(ds), self.S), fill_value=-999999999.0, device=self.device)
+            for images in loader:
+                bsz = images.shape[0]
+                images = images.to(self.device, non_blocking=True)
+                features = self.model(images)
+                class_features[from_: from_ + bsz] = features
+                from_ += bsz
+
+            cov = torch.cov(class_features.T)
+            svals = torch.linalg.svdvals(cov)
+            xd = torch.cumsum(svals, 0)
+            xd = xd[xd < self.sval_fraction * torch.sum(svals)]
+            explain = xd.shape[0]
+            self.svals_explained_by[t].append(explain)
+
+    def print_singular_values(self):
+        print(f"{self.sval_fraction} of eigenvalues sum is explained by:")
+        for t, explained_by in enumerate(self.svals_explained_by):
+            print(f"Task {t}: {explained_by}")
