@@ -12,6 +12,8 @@ from torchmetrics import Accuracy
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
+from .criterions.proxy_nca import ProxyNCA
+from .criterions.ce import CE
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
@@ -20,7 +22,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10, K=3, S=64, criterion="proxy-nca", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -33,17 +35,18 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
-        str_to_model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
-                        "resnet14": resnet14(num_features=S, activation_function=activation_function),
-                        "resnet20": resnet20(num_features=S, activation_function=activation_function),
-                        "resnet32": resnet32(num_features=S, activation_function=activation_function)}
-        self.model = str_to_model[nnet]
+        self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
+                      "resnet14": resnet14(num_features=S, activation_function=activation_function),
+                      "resnet20": resnet20(num_features=S, activation_function=activation_function),
+                      "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.prototypes = {}
         self.task_offset = [0]
         self.classes_in_tasks = []
+        self.criterion = {"proxy-nca": ProxyNCA,
+                          "ce" : CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
 
@@ -81,6 +84,11 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["identity", "relu", "lrelu"],
                             default="relu")
+        parser.add_argument('--criterion',
+                            help='Loss function',
+                            type=str,
+                            choices=["ce", "proxy-nca"],
+                            default="proxy-nca")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -97,7 +105,6 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
         self.old_model = copy.deepcopy(self.model)
-        self.old_model.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
@@ -114,17 +121,18 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
-        head = nn.Linear(self.S, num_classes_in_t)
-        head.to(self.device, non_blocking=True)
         distiller = nn.Linear(self.S, self.S)
         distiller.to(self.device, non_blocking=True)
-        parameters = list(self.model.parameters()) + list(head.parameters()) + list(distiller.parameters())
+        criterion = self.criterion(num_classes_in_t, self.S, self.device)
+        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+
         for epoch in range(self.nepochs):
             train_loss, valid_loss = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
-            head.train()
+            self.old_model.train()
+            criterion.train()
             distiller.train()
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
@@ -132,23 +140,24 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 3:
-                    features = features.detach()
-                old_features = None
-                if t > 0:
-                    with torch.no_grad():
-                        old_features = self.old_model(images)
-                out = head(features)
-                loss = self.criterion(t, out, targets, distiller(features), old_features)
+                # if epoch < 3:
+                #     features = features.detach()
+                loss, logits = criterion(features, targets)
+                with torch.no_grad():
+                    old_features = self.old_model(images) if t > 0 else None
+                loss = self.distill_knowledge(loss, features, distiller, old_features)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(criterion.parameters(), self.clipgrad)
                 optimizer.step()
-                train_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
+                if logits is not None:
+                    train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step()
 
             self.model.eval()
-            head.eval()
+            self.old_model.eval()
+            criterion.eval()
             distiller.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
@@ -156,13 +165,12 @@ class Appr(Inc_Learning_Appr):
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
-                    old_features = None
-                    if t > 0:
-                        old_features = self.old_model(images)
-                    out = head(features)
-                    loss = self.criterion(t, out, targets, features, old_features)
+                    loss, logits = criterion(features, targets)
+                    old_features = self.old_model(images) if t>0 else None
 
-                    val_hits += float(torch.sum((torch.argmax(out, dim=1) == targets)))
+                    loss = self.distill_knowledge(loss, features, distiller, old_features)
+                    if logits is not None:
+                        val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
@@ -172,7 +180,6 @@ class Appr(Inc_Learning_Appr):
 
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
                   f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
-        self.model.fc = nn.Identity()
 
 
     @torch.no_grad()
@@ -311,13 +318,12 @@ class Appr(Inc_Learning_Appr):
 
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
-    def criterion(self, t, outputs, targets, features, old_features=None):
-        """Returns the loss value"""
-        ce_loss = nn.functional.cross_entropy(outputs, targets, label_smoothing=self.smoothing)
+    def distill_knowledge(self, loss, features, distiller, old_features=None):
+        """Returns loss ce with kd"""
         if old_features is None:
-            return ce_loss
-        kd_loss = nn.functional.mse_loss(features, old_features)
-        total_loss = (1 - self.alpha) * ce_loss + self.alpha * kd_loss
+            return loss
+        kd_loss = nn.functional.mse_loss(features, distiller(old_features))
+        total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss
 
 

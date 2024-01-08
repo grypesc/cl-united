@@ -20,7 +20,7 @@ class ProxyNCA(torch.nn.Module):
                  scaling_x=1,
                  scaling_p=3
                  ):
-        torch.nn.Module.__init__(self)
+        super().__init__()
         # initialize proxies s.t. norm of each proxy ~1 through div by 8
         # i.e. proxies.norm(2, dim=1)) should be close to [1,1,...,1]
         # TODO: use norm instead of div 8, because of embedding size
@@ -36,6 +36,6 @@ class ProxyNCA(torch.nn.Module):
         T = binarize_and_smooth_labels(T, len(P), self.smoothing_const)
         # note that compared to proxy nca, positive included in denominator
         loss = torch.sum(-T * F.log_softmax(-D, -1), -1)
-        return loss.mean()
+        return loss.mean(), None
 
 
