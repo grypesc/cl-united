@@ -128,11 +128,12 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
-        self.distiller = nn.Linear(self.S, self.S)
+        self.distiller = nn.Linear(self.S, self.S, bias=False)
+        self.distiller.weight = nn.Parameter(torch.eye(64, device=self.device) + (torch.rand(64,device=self.device)-0.5) / 1e2)
         if self.distiller_type == "mlp":
-            self.distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+            self.distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
                                            nn.LeakyReLU(),
-                                           nn.Linear(2 * self.S, self.S)
+                                           nn.Linear(2 * self.S, self.S, bias=False)
                                            )
         self.distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
@@ -140,7 +141,7 @@ class Appr(Inc_Learning_Appr):
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
 
         for epoch in range(self.nepochs):
-            train_loss, valid_loss = [], []
+            train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
             self.old_model.train()
@@ -152,19 +153,20 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 3:
+                if t > 0 and epoch < 5:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                loss = self.distill_knowledge(loss, features, self.distiller, old_features)
-                loss.backward()
+                total_loss, kd_loss = self.distill_knowledge(loss, features, self.distiller, old_features)
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
                 torch.nn.utils.clip_grad_norm_(criterion.parameters(), self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
+                train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
             self.model.eval()
@@ -180,18 +182,22 @@ class Appr(Inc_Learning_Appr):
                     loss, logits = criterion(features, targets)
                     old_features = self.old_model(images) if t>0 else None
 
-                    loss = self.distill_knowledge(loss, features, self.distiller, old_features)
+                    _, kd_loss = self.distill_knowledge(loss, features, self.distiller, old_features)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
+                    valid_kd_loss.append(float(bsz * kd_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
+            train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
+            valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
+
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} "
-                  f"Train acc: {100 * train_acc:.2f} Val acc: {100 * val_acc:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
 
     @torch.no_grad()
@@ -301,10 +307,10 @@ class Appr(Inc_Learning_Appr):
     def distill_knowledge(self, loss, features, distiller, old_features=None):
         """Returns loss ce with kd"""
         if old_features is None:
-            return loss
+            return loss, 0
         kd_loss = nn.functional.mse_loss(distiller(old_features), features)
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
-        return total_loss
+        return total_loss, kd_loss
 
 
     def get_optimizer(self, parameters, wd, milestones=[30, 60, 90]):
@@ -347,3 +353,8 @@ class Appr(Inc_Learning_Appr):
         print(f"{self.sval_fraction} of eigenvalues sum is explained by:")
         for t, explained_by in enumerate(self.svals_explained_by):
             print(f"Task {t}: {explained_by}")
+
+def normalized_mse(x, target):
+    diff = torch.pow(target - x, 2)
+    out = diff
+    return out

@@ -79,8 +79,8 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.bottleneck(x)
         features = torch.mean(x, dim=(2, 3))
-        x = self.fc(features)
-        return x
+        features = torch.nn.functional.normalize(features, dim=1)
+        return features
 
 
 def resnet32(pretrained=False, **kwargs):
