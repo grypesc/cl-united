@@ -334,7 +334,7 @@ class Appr(Inc_Learning_Appr):
         """Returns loss ce with kd"""
         if old_features is None:
             return loss
-        kd_loss = nn.functional.mse_loss(features, distiller(old_features))
+        kd_loss = nn.functional.mse_loss(distiller(old_features), features)
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss
 
