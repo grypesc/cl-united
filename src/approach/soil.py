@@ -230,47 +230,15 @@ class Appr(Inc_Learning_Appr):
             centroid = class_features.mean(dim=0)
             self.prototypes[c] = centroid
 
+        print("Proto norm statistics:")
+        protos = torch.norm(torch.stack(list(self.prototypes.values())), dim=1)
+        print(f"Mean: {protos.mean():.2f}, median: {protos.median():.2f}")
+        print(f"Range: [{protos.min():.2f}; {protos.max():.2f}]")
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
         self.old_model.eval()
-        # adapter = nn.Sequential(nn.Linear(self.S, 256), nn.ReLU(), nn.Linear(256, self.S))
-        # adapter = nn.Sequential(nn.Linear(self.S, self.S))
-        # adapter.to(self.device, non_blocking=True)
-        # optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_prototypes = copy.deepcopy(self.prototypes)
-        # for epoch in range(self.nepochs):
-        #     adapter.train()
-        #     train_loss, valid_loss = [], []
-        #     for images, _ in trn_loader:
-        #         bsz = images.shape[0]
-        #         images = images.to(self.device, non_blocking=True)
-        #         optimizer.zero_grad()
-        #         with torch.no_grad():
-        #             target = self.model(images)
-        #             old_features = self.old_model(images)
-        #         adapted_features = adapter(old_features)
-        #         loss = torch.nn.functional.mse_loss(adapted_features, target)
-        #         loss.backward()
-        #         torch.nn.utils.clip_grad_norm_(adapter.parameters(), self.clipgrad)
-        #         optimizer.step()
-        #         train_loss.append(float(bsz * loss))
-        #     lr_scheduler.step()
-        #
-        #     adapter.eval()
-        #     with torch.no_grad():
-        #         for images, _ in val_loader:
-        #             bsz = images.shape[0]
-        #             images = images.to(self.device, non_blocking=True)
-        #             target = self.model(images)
-        #             old_features = self.old_model(images)
-        #             adapted_features = adapter(old_features)
-        #             loss = torch.nn.functional.mse_loss(adapted_features, target)
-        #             valid_loss.append(float(bsz * loss))
-        #
-        #     train_loss = sum(train_loss) / len(trn_loader.dataset)
-        #     valid_loss = sum(valid_loss) / len(val_loader.dataset)
-        #     print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
 
         # Calculate new prototypes
         with torch.no_grad():
@@ -346,11 +314,11 @@ class Appr(Inc_Learning_Appr):
         return optimizer, scheduler
 
 
-    def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
-        """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-6, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
-        return optimizer, scheduler
+    # def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
+    #     """Returns the optimizer"""
+    #     optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-6, momentum=0.9)
+    #     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
+    #     return optimizer, scheduler
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
