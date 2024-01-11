@@ -128,13 +128,16 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
-        self.distiller = nn.Linear(self.S, self.S, bias=False)
-        self.distiller.weight = nn.Parameter(torch.eye(64, device=self.device) + (torch.rand(64,device=self.device)-0.5) / 1e2)
-        if self.distiller_type == "mlp":
-            self.distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
-                                           nn.LeakyReLU(),
-                                           nn.Linear(2 * self.S, self.S, bias=False)
-                                           )
+        with torch.no_grad():
+            self.distiller = nn.Linear(self.S, self.S, bias=False)
+            self.distiller.weight.data = nn.Parameter(torch.eye(64, device=self.device) + (torch.rand(64,device=self.device)-0.5) / 1e2)
+            if self.distiller_type == "mlp":
+                self.distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
+                                               nn.LeakyReLU(),
+                                               nn.Linear(2 * self.S, self.S, bias=False)
+                                               )
+                # self.distiller._modules["0"].weight.data = nn.Parameter(torch.eye(128, 64) + (torch.rand((128, 64)) - 0.5) / 1e2)
+                # self.distiller._modules["2"].weight.data = nn.Parameter(torch.eye(64, 128) + (torch.rand((64, 128)) - 0.5) / 1e2)
         self.distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(self.distiller.parameters())
@@ -153,7 +156,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and epoch < 5:
+                if t > 0 and epoch < 10:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
@@ -162,6 +165,7 @@ class Appr(Inc_Learning_Appr):
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
                 torch.nn.utils.clip_grad_norm_(criterion.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(self.distiller.parameters(), self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
