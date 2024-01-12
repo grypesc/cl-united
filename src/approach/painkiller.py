@@ -125,7 +125,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(self.S, t * self.S)
         if self.adapter_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * t * self.S),
-                                    nn.ReLU(),
+                                    nn.GELU(),
                                     nn.Linear(2 * t * self.S, t * self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
@@ -165,6 +165,7 @@ class Appr(Inc_Learning_Appr):
             lr_scheduler.step()
 
             model.eval()
+            adapter.eval()
             criterion.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
@@ -242,7 +243,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(t * self.S, self.S)
         if self.adapter_type == "mlp":
             adapter = nn.Sequential(nn.Linear(t * self.S, 2 * t * self.S),
-                                    nn.LeakyReLU(),
+                                    nn.GELU(),
                                     nn.Linear(2 * t * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
