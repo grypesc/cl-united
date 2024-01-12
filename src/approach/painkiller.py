@@ -320,15 +320,17 @@ class Appr(Inc_Learning_Appr):
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-    def get_optimizer(self, parameters, wd, milestones=[30, 60, 90]):
+    def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
+        milestones = [self.nepochs * 0.3, self.nepochs * 0.6, self.nepochs * 0.9]
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
 
-    def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
+    def get_adapter_optimizer(self, parameters):
         """Returns the optimizer"""
+        milestones = [self.nepochs * 0.3, self.nepochs * 0.6, self.nepochs * 0.9]
         optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
