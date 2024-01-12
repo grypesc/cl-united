@@ -31,7 +31,6 @@ class Appr(Inc_Learning_Appr):
         self.alpha = alpha
         self.smoothing = smoothing
 
-        self.old_models = None
         self.activation = activation_function
         self.model_class = {"resnet8": resnet8,
                             "resnet14": resnet14,
@@ -258,7 +257,7 @@ class Appr(Inc_Learning_Appr):
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {1000*train_loss:.2f} Val loss: {1000*valid_loss:.2f} ")
+            print(f"Epoch: {epoch} Train loss: {100*train_loss:.2f} Val loss: {100*valid_loss:.2f} ")
 
         # Calculate new dimension values for old prototypes
         with torch.no_grad():

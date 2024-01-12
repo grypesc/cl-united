@@ -37,7 +37,7 @@ class ResNet(nn.Module):
         "lrelu": nn.LeakyReLU(inplace=True)
     }
 
-    def __init__(self, block, layers, num_features, num_classes=10, activation_function="relu"):
+    def __init__(self, block, layers, num_features, num_classes=10, activation_function="relu", normalize=False):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
@@ -49,6 +49,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
         self.bottleneck = nn.Conv2d(64, num_features, 1, stride=1)
+        self.normalize = normalize
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
         # for m in self.modules():
@@ -79,7 +80,8 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.bottleneck(x)
         features = torch.mean(x, dim=(2, 3))
-        features = torch.nn.functional.normalize(features, dim=1)
+        if self.normalize:
+            features = torch.nn.functional.normalize(features, dim=1)
         return features
 
 

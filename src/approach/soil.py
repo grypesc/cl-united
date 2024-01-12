@@ -50,7 +50,7 @@ class Appr(Inc_Learning_Appr):
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
-        self.distiller = None
+
 
 
     @staticmethod
@@ -128,19 +128,15 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
-        with torch.no_grad():
-            self.distiller = nn.Linear(self.S, self.S, bias=False)
-            self.distiller.weight.data = nn.Parameter(torch.eye(64, device=self.device) + (torch.rand(64,device=self.device)-0.5) / 1e2)
-            if self.distiller_type == "mlp":
-                self.distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
-                                               nn.LeakyReLU(),
-                                               nn.Linear(2 * self.S, self.S, bias=False)
-                                               )
-                # self.distiller._modules["0"].weight.data = nn.Parameter(torch.eye(128, 64) + (torch.rand((128, 64)) - 0.5) / 1e2)
-                # self.distiller._modules["2"].weight.data = nn.Parameter(torch.eye(64, 128) + (torch.rand((64, 128)) - 0.5) / 1e2)
-        self.distiller.to(self.device, non_blocking=True)
+        distiller = nn.Linear(self.S, self.S, bias=False)
+        if self.distiller_type == "mlp":
+            distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
+                                      nn.LeakyReLU(),
+                                      nn.Linear(2 * self.S, self.S, bias=False)
+                                      )
+        distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
-        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(self.distiller.parameters())
+        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
 
         for epoch in range(self.nepochs):
@@ -149,23 +145,23 @@ class Appr(Inc_Learning_Appr):
             self.model.train()
             self.old_model.train()
             criterion.train()
-            self.distiller.train()
+            distiller.train()
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and epoch < 10:
-                    features = features.detach()
+                # if epoch < 3:
+                #     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                total_loss, kd_loss = self.distill_knowledge(loss, features, self.distiller, old_features)
+                total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
                 torch.nn.utils.clip_grad_norm_(criterion.parameters(), self.clipgrad)
-                torch.nn.utils.clip_grad_norm_(self.distiller.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(distiller.parameters(), self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
@@ -176,7 +172,7 @@ class Appr(Inc_Learning_Appr):
             self.model.eval()
             self.old_model.eval()
             criterion.eval()
-            self.distiller.eval()
+            distiller.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
@@ -186,7 +182,7 @@ class Appr(Inc_Learning_Appr):
                     loss, logits = criterion(features, targets)
                     old_features = self.old_model(images) if t>0 else None
 
-                    _, kd_loss = self.distill_knowledge(loss, features, self.distiller, old_features)
+                    _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
@@ -213,16 +209,11 @@ class Appr(Inc_Learning_Appr):
         for c in range(num_classes_in_t):
             c = c + self.task_offset[t]
             train_indices = torch.tensor(trn_loader.dataset.labels) == c
-            # Uncomment to add valid set to distributions
-            # val_indices = torch.tensor(val_loader.dataset.labels) == c
             if isinstance(trn_loader.dataset.images, list):
                 train_images = list(compress(trn_loader.dataset.images, train_indices))
                 ds = ClassDirectoryDataset(train_images, transforms)
-                # val_images = list(compress(val_loader.dataset.images, val_indices))
-                # ds = ClassDirectoryDataset(train_images + val_images, transforms)
             else:
                 ds = trn_loader.dataset.images[train_indices]
-                # ds = np.concatenate((trn_loader.dataset.images[train_indices], val_loader.dataset.images[val_indices]), axis=0)
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
             from_ = 0
@@ -240,21 +231,57 @@ class Appr(Inc_Learning_Appr):
             centroid = class_features.mean(dim=0)
             self.prototypes[c] = centroid
 
-        print("Proto norm statistics:")
-        protos = torch.norm(torch.stack(list(self.prototypes.values())), dim=1)
-        print(f"Mean: {protos.mean():.2f}, median: {protos.median():.2f}")
-        print(f"Range: [{protos.min():.2f}; {protos.max():.2f}]")
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
         self.old_model.eval()
+        adapter = nn.Linear(self.S, self.S, bias=False)
+        if self.distiller_type == "mlp":
+            adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
+                                      nn.LeakyReLU(),
+                                      nn.Linear(2 * self.S, self.S, bias=False)
+                                      )
+        adapter.to(self.device, non_blocking=True)
+        optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_prototypes = copy.deepcopy(self.prototypes)
+        for epoch in range(self.nepochs):
+            adapter.train()
+            train_loss, valid_loss = [], []
+            for images, _ in trn_loader:
+                bsz = images.shape[0]
+                images = images.to(self.device, non_blocking=True)
+                optimizer.zero_grad()
+                with torch.no_grad():
+                    target = self.model(images)
+                    old_features = self.old_model(images)
+                adapted_features = adapter(old_features)
+                loss = torch.nn.functional.mse_loss(adapted_features, target)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(adapter.parameters(), self.clipgrad)
+                optimizer.step()
+                train_loss.append(float(bsz * loss))
+            lr_scheduler.step()
+
+            adapter.eval()
+            with torch.no_grad():
+                for images, _ in val_loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device, non_blocking=True)
+                    target = self.model(images)
+                    old_features = self.old_model(images)
+                    adapted_features = adapter(old_features)
+                    loss = torch.nn.functional.mse_loss(adapted_features, target)
+                    valid_loss.append(float(bsz * loss))
+
+            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            valid_loss = sum(valid_loss) / len(val_loader.dataset)
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
 
         # Calculate new prototypes
         with torch.no_grad():
-            self.distiller.eval()
+            adapter.eval()
             for c, prototype in self.prototypes.items():
-                self.prototypes[c] = self.distiller(prototype)
+                self.prototypes[c] = adapter(prototype)
 
             # Evaluation
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
@@ -312,7 +339,7 @@ class Appr(Inc_Learning_Appr):
         """Returns loss ce with kd"""
         if old_features is None:
             return loss, 0
-        kd_loss = nn.functional.mse_loss(distiller(old_features), features)
+        kd_loss = nn.functional.mse_loss(distiller(features), old_features)
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
@@ -324,11 +351,11 @@ class Appr(Inc_Learning_Appr):
         return optimizer, scheduler
 
 
-    # def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
-    #     """Returns the optimizer"""
-    #     optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-6, momentum=0.9)
-    #     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
-    #     return optimizer, scheduler
+    def get_adapter_optimizer(self, parameters, milestones=[30, 60, 90]):
+        """Returns the optimizer"""
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-6, momentum=0.9)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
+        return optimizer, scheduler
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
@@ -357,8 +384,3 @@ class Appr(Inc_Learning_Appr):
         print(f"{self.sval_fraction} of eigenvalues sum is explained by:")
         for t, explained_by in enumerate(self.svals_explained_by):
             print(f"Task {t}: {explained_by}")
-
-def normalized_mse(x, target):
-    diff = torch.pow(target - x, 2)
-    out = diff
-    return out
