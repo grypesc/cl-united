@@ -122,15 +122,15 @@ class Appr(Inc_Learning_Appr):
         print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
 
-        adapter = nn.Linear(self.S, t * self.S)
+        adapter = nn.Linear((t+1) * self.S, t * self.S)
         if self.adapter_type == "mlp":
-            adapter = nn.Sequential(nn.Linear(self.S, 2 * t * self.S),
+            adapter = nn.Sequential(nn.Linear((t+1) * self.S, 2 * t * self.S),
                                     nn.GELU(),
                                     nn.Linear(2 * t * self.S, t * self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
 
-        criterion = self.criterion(num_classes_in_t, self.S, self.device)
+        criterion = self.criterion(num_classes_in_t, self.S * (t+1), self.device)
         parameters = list(model.parameters()) + list(criterion.parameters()) + list(adapter.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
@@ -147,11 +147,13 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 old_features = None
+                features = model(images)
                 if t > 0:
                     with torch.no_grad():
                         old_features = [model(images) for model in self.models[:-1]]
                         old_features = torch.cat(old_features, dim=1)
-                features = model(images)
+                    features = torch.cat((old_features, features), dim=1)
+
                 loss, logits = criterion(features, targets)
                 total_loss, kd_loss = self.distill_knowledge(loss, features, adapter, old_features)
                 total_loss.backward()
@@ -172,12 +174,12 @@ class Appr(Inc_Learning_Appr):
                     targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
-                    features = model(images)
                     old_features = None
+                    features = model(images)
                     if t > 0:
-                        with torch.no_grad():
-                            old_features = [model(images) for model in self.models[:-1]]
-                            old_features = torch.cat(old_features, dim=1)
+                        old_features = [model(images) for model in self.models[:-1]]
+                        old_features = torch.cat(old_features, dim=1)
+                        features = torch.cat((old_features, features), dim=1)
                     loss, logits = criterion(features, targets)
                     _, kd_loss = self.distill_knowledge(loss, features, adapter, old_features)
                     if logits is not None:
