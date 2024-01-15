@@ -325,7 +325,7 @@ class Appr(Inc_Learning_Appr):
     def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
         milestones = [int(self.nepochs * 0.3), int(self.nepochs * 0.6), int(self.nepochs * 0.9)]
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
+        optimizer = torch.optim.AdamW(parameters, lr=1e-3, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -333,7 +333,7 @@ class Appr(Inc_Learning_Appr):
     def get_adapter_optimizer(self, parameters):
         """Returns the optimizer"""
         milestones = [int(self.nepochs * 0.3), int(self.nepochs * 0.6), int(self.nepochs * 0.9)]
-        optimizer = torch.optim.SGD(parameters, lr=0.05, weight_decay=1e-5, momentum=0.9)
+        optimizer = torch.optim.AdamW(parameters, lr=1e-3, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
