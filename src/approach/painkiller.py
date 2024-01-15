@@ -36,7 +36,7 @@ class Appr(Inc_Learning_Appr):
                             "resnet14": resnet14,
                             "resnet20": resnet20,
                             "resnet32": resnet32}[nnet]
-        self.models = []
+        self.models = nn.ModuleList()
         self.model = None
         self.train_data_loaders, self.val_data_loaders = [], []
         self.prototypes = {}
@@ -324,7 +324,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
-        milestones = [self.nepochs * 0.3, self.nepochs * 0.6, self.nepochs * 0.9]
+        milestones = [int(self.nepochs * 0.3), int(self.nepochs * 0.6), int(self.nepochs * 0.9)]
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
@@ -332,8 +332,8 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters):
         """Returns the optimizer"""
-        milestones = [self.nepochs * 0.3, self.nepochs * 0.6, self.nepochs * 0.9]
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
+        milestones = [int(self.nepochs * 0.3), int(self.nepochs * 0.6), int(self.nepochs * 0.9)]
+        optimizer = torch.optim.SGD(parameters, lr=0.05, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
