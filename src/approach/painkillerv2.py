@@ -26,11 +26,11 @@ class Adapter(torch.nn.Module):
         self.t = t
         self.device = device
 
-        self.nn = nn.Linear((t+1) * S, t * S)
+        self.nn = nn.Linear(t * S, S)
         if adapter_type == "mlp":
-            self.nn = nn.Sequential(nn.Linear((t+1) * S, 2 * t * S),
+            self.nn = nn.Sequential(nn.Linear(t * S, 2 * t * S),
                                       nn.GELU(),
-                                      nn.Linear(2 * t * S, t * S)
+                                      nn.Linear(2 * t * S, S)
                                       )
 
         self.train_losses, self.samples = [], []
@@ -46,11 +46,11 @@ class Adapter(torch.nn.Module):
             self.nn.train()
             for images, _ in trn_loader:
                 bsz = images.shape[0]
-                images, targets = images.to(self.device, non_blocking=True)
+                images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 with torch.no_grad():
                     target = models[-1](images)
-                    features = [m(images) for m in self.models[:-1]]
+                    features = [m(images) for m in models[:-1]]
                     features = torch.cat(features, dim=1)
 
 
@@ -71,9 +71,9 @@ class Adapter(torch.nn.Module):
             with torch.no_grad():
                 for images, _ in val_loader:
                     bsz = images.shape[0]
-                    images, targets = images.to(self.device, non_blocking=True)
+                    images = images.to(self.device, non_blocking=True)
                     target = models[-1](images)
-                    features = [m(images) for m in self.models[:-1]]
+                    features = [m(images) for m in models[:-1]]
                     features = torch.cat(features, dim=1)
 
                     adapted_features = self.nn(features)
@@ -220,12 +220,13 @@ class Appr(Inc_Learning_Appr):
                                     nn.Linear(2 * t * self.S, t * self.S)
                                     )
         distiller.to(self.device, non_blocking=True)
+        self.prototypes = torch.cat((self.prototypes, torch.zeros((num_classes_in_t, self.S), device=self.device)), dim=0)
 
         if t>0:
             adapter = Adapter(self.adapter_type, self.S, t, self.device)
             adapter.to(self.device, non_blocking=True)
             print("Warming up the adapter, bitch.")
-            prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, 100)
+            prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, 3)
             adapter.train()
 
         criterion = self.criterion(num_classes_in_t, self.S * (t+1), self.device)
