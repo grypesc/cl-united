@@ -39,7 +39,7 @@ class Adapter(torch.nn.Module):
 
     def forward(self, trn_loader, val_loader, models, prototypes, epochs, iterations=-1):
         """ Sets initial weights for the adapter and estimates initial positions of centroids"""
-        optimizer, lr_scheduler = self.get_optimizer(self.nn.parameters(), epochs)
+        optimizer, lr_scheduler = self.get_optimizer(self.nn.parameters(), epochs, iterations)
 
         for m in models:
             m.eval()
@@ -62,9 +62,11 @@ class Adapter(torch.nn.Module):
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
                 train_samples.append(bsz)
-                iterations -= 1
-                if iterations == 0:
-                    break
+                # iterations -= 1
+                # if iterations > 0:
+                #     lr_scheduler.step()
+                # if iterations == 0:
+                #     break
 
             lr_scheduler.step()
             self.nn.eval()
@@ -85,8 +87,8 @@ class Adapter(torch.nn.Module):
                 valid_loss = sum(valid_loss) / len(val_loader.dataset)
 
             print(f"Adapter epoch: {epoch} Train: {100 * train_loss:.2f} Val: {100 * valid_loss:.2f}")
-            if iterations == 0:
-                break
+            # if iterations == 0:
+            #     break
 
         return self.adapt_prototypes(prototypes)
 
@@ -103,7 +105,7 @@ class Adapter(torch.nn.Module):
         milestones = [int(epochs * 0.3), int(epochs * 0.6), int(epochs * 0.9)]
         if iterations > 0:
             milestones = [int(iterations * 0.3), int(iterations * 0.6), int(iterations * 0.9)]
-        optimizer = torch.optim.SGD(parameters, lr=1e-1, weight_decay=1e-8, momentum=0.9)
+        optimizer = torch.optim.AdamW(parameters, lr=1e-3, weight_decay=1e-6)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -206,6 +208,8 @@ class Appr(Inc_Learning_Appr):
         for model in self.models:
             model.eval()
         model = self.model_class(num_features=self.S, activation_function=self.activation)
+        if t > 0:
+            model = copy.deepcopy(self.models[-1])
         self.models.append(model)
         model = model.to(self.device, non_blocking=True)
         print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
@@ -225,10 +229,9 @@ class Appr(Inc_Learning_Appr):
             adapter = Adapter(self.adapter_type, self.S, t, self.device)
             adapter.to(self.device, non_blocking=True)
             print("Warming up the adapter, bitch.")
-            self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, 3)
-            adapter.train()
+            self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, epochs=90)
 
-        criterion = self.criterion(num_classes_in_t, self.S * (t+1), self.device)
+        criterion = self.criterion(num_classes_in_t, self.S, self.device)
         parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
@@ -249,9 +252,9 @@ class Appr(Inc_Learning_Appr):
                     with torch.no_grad():
                         old_features = [model(images) for model in self.models[:-1]]
                         old_features = torch.cat(old_features, dim=1)
-                    features = torch.cat((old_features, features), dim=1)
+                    # features = torch.cat((old_features, features), dim=1)
 
-                loss, _ = criterion(features, targets, self.prototypes[-self.S:])
+                loss, _ = criterion(features, targets, self.prototypes[:, -self.S:])
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
@@ -261,7 +264,7 @@ class Appr(Inc_Learning_Appr):
                 train_kd_loss.append(float(kd_loss))
 
                 if t > 0:
-                    self.prototypes = adapter(images, self.models, old_features)
+                    self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, 1)
 
             lr_scheduler.step()
             model.eval()
@@ -277,8 +280,8 @@ class Appr(Inc_Learning_Appr):
                     if t > 0:
                         old_features = [model(images) for model in self.models[:-1]]
                         old_features = torch.cat(old_features, dim=1)
-                        features = torch.cat((old_features, features), dim=1)
-                    loss, _ = criterion(features, targets, self.prototypes)
+                        # features = torch.cat((old_features, features), dim=1)
+                    loss, _ = criterion(features, targets, self.prototypes[:, -self.S:])
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                     valid_kd_loss.append(float(kd_loss))
                     valid_loss.append(float(bsz * loss))
