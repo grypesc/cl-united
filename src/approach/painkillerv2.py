@@ -16,22 +16,24 @@ from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_proto import ProxyProto
 from .criterions.ce import CE
 
-torch.backends.cuda.matmul.allow_tf32 = False
+# torch.backends.cuda.matmul.allow_tf32 = False
+
 
 class Adapter(torch.nn.Module):
     def __init__(self, adapter_type, S, t, device):
         super().__init__()
         if t == 0:
             raise RuntimeError("Adapter is not needed when t==0")
+        self.S = S
         self.t = t
         self.device = device
 
         self.nn = nn.Linear(t * S, S)
         if adapter_type == "mlp":
             self.nn = nn.Sequential(nn.Linear(t * S, 2 * t * S),
-                                      nn.GELU(),
-                                      nn.Linear(2 * t * S, S)
-                                      )
+                                    nn.GELU(),
+                                    nn.Linear(2 * t * S, S)
+                                    )
 
         self.train_losses, self.samples = [], []
 
@@ -52,7 +54,6 @@ class Adapter(torch.nn.Module):
                     target = models[-1](images)
                     features = [m(images) for m in models[:-1]]
                     features = torch.cat(features, dim=1)
-
 
                 adapted_features = self.nn(features)
                 loss = F.mse_loss(adapted_features, target)
@@ -83,7 +84,6 @@ class Adapter(torch.nn.Module):
                 train_loss = sum(train_loss) / sum(train_samples)
                 valid_loss = sum(valid_loss) / len(val_loader.dataset)
 
-
             print(f"Adapter epoch: {epoch} Train: {100 * train_loss:.2f} Val: {100 * valid_loss:.2f}")
             if iterations == 0:
                 break
@@ -94,10 +94,9 @@ class Adapter(torch.nn.Module):
     def adapt_prototypes(self, prototypes):
         # Calculate new dimension values for old prototypes
         self.nn.eval()
-        prototypes[-self.S:] = self.nn(prototypes[:-self.S])
+        prototypes[:, -self.S:] = self.nn(prototypes[:, :-self.S])
         self.nn.train()
         return prototypes
-
 
     def get_optimizer(self, parameters, epochs, iterations=0):
         """Returns the optimizer"""
@@ -107,7 +106,6 @@ class Adapter(torch.nn.Module):
         optimizer = torch.optim.SGD(parameters, lr=1e-1, weight_decay=1e-8, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
-
 
 
 class Appr(Inc_Learning_Appr):
@@ -132,7 +130,7 @@ class Appr(Inc_Learning_Appr):
         self.models = nn.ModuleList()
         self.model = None
         self.train_data_loaders, self.val_data_loaders = [], []
-        self.prototypes = torch.empty((0, S), device=self.device)
+        self.prototypes = torch.empty((0, 0), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = ProxyProto
@@ -200,9 +198,9 @@ class Appr(Inc_Learning_Appr):
         #     print("### Adapting prototypes ###")
         #     self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
+        self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
-
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         for model in self.models:
@@ -213,20 +211,21 @@ class Appr(Inc_Learning_Appr):
         print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} frozen parameters\n')
 
-        distiller = nn.Linear((t+1) * self.S, t * self.S)
+        distiller = nn.Linear(self.S, t * self.S)
         if self.adapter_type == "mlp":
-            distiller = nn.Sequential(nn.Linear((t+1) * self.S, 2 * t * self.S),
-                                    nn.GELU(),
-                                    nn.Linear(2 * t * self.S, t * self.S)
-                                    )
+            distiller = nn.Sequential(nn.Linear(self.S, 2 * t * self.S),
+                                      nn.GELU(),
+                                      nn.Linear(2 * t * self.S, t * self.S)
+                                      )
         distiller.to(self.device, non_blocking=True)
-        self.prototypes = torch.cat((self.prototypes, torch.zeros((num_classes_in_t, self.S), device=self.device)), dim=0)
+        # Expand existing protos, we will add new protos at the very end of this function
+        self.prototypes = torch.cat((self.prototypes, torch.zeros((self.prototypes.shape[0], self.S), device=self.device)), dim=1)
 
-        if t>0:
+        if t > 0:
             adapter = Adapter(self.adapter_type, self.S, t, self.device)
             adapter.to(self.device, non_blocking=True)
             print("Warming up the adapter, bitch.")
-            prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, 3)
+            self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, 3)
             adapter.train()
 
         criterion = self.criterion(num_classes_in_t, self.S * (t+1), self.device)
@@ -252,7 +251,7 @@ class Appr(Inc_Learning_Appr):
                         old_features = torch.cat(old_features, dim=1)
                     features = torch.cat((old_features, features), dim=1)
 
-                loss, _ = criterion(features, targets, self.prototypes)
+                loss, _ = criterion(features, targets, self.prototypes[-self.S:])
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
@@ -263,8 +262,6 @@ class Appr(Inc_Learning_Appr):
 
                 if t > 0:
                     self.prototypes = adapter(images, self.models, old_features)
-
-
 
             lr_scheduler.step()
             model.eval()
@@ -291,12 +288,11 @@ class Appr(Inc_Learning_Appr):
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
 
-
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f}")
 
-        new_prototypes = criterion.proxies.data[-self.S:]
-        self.prototypes = torch.cat((self.prototypes, new_prototypes), dim=0)
+        # new_prototypes_new_vals = criterion.proxies.data[-self.S:]
+        # self.prototypes = torch.cat((self.prototypes, new_prototypes), dim=0)
 
 
     @torch.no_grad()
@@ -327,15 +323,54 @@ class Appr(Inc_Learning_Appr):
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
+    @torch.no_grad()
+    def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
+        """ Create distributions for task t"""
+        for model in self.models:
+            model.eval()
+        transforms = val_loader.dataset.transform
+        new_protos = []
+        for c in range(num_classes_in_t):
+            c = c + self.task_offset[t]
+            train_indices = torch.tensor(trn_loader.dataset.labels) == c
+            if isinstance(trn_loader.dataset.images, list):
+                train_images = list(compress(trn_loader.dataset.images, train_indices))
+                ds = ClassDirectoryDataset(train_images, transforms)
+            else:
+                ds = trn_loader.dataset.images[train_indices]
+                ds = ClassMemoryDataset(ds, transforms)
+            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+            from_ = 0
+            class_features = torch.full((2 * len(ds), (t+1) * self.S), fill_value=-999999999.0, device=self.device)
+            for images in loader:
+                bsz = images.shape[0]
+                images = images.to(self.device, non_blocking=True)
+                features = [model(images) for model in self.models]
+                features = torch.cat(features, dim=1)
+                class_features[from_: from_+bsz] = features
+                flipped_images = torch.flip(images, dims=(3,))
+                features = [model(flipped_images) for model in self.models]
+                features = torch.cat(features, dim=1)
+                class_features[from_+bsz: from_+2*bsz] = features
+                from_ += 2*bsz
+
+            # Calculate centroid
+            centroid = class_features.mean(dim=0)
+            new_protos.append(centroid)
+        new_protos = torch.stack(new_protos)
+        self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
+
+        print("Proto norm statistics:")
+        protos = torch.norm(self.prototypes, dim=1)
+        print(f"Mean: {protos.mean():.2f}, median: {protos.median():.2f}")
+        print(f"Range: [{protos.min():.2f}; {protos.max():.2f}]")
+
     def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
         milestones = [int(self.nepochs * 0.3), int(self.nepochs * 0.6), int(self.nepochs * 0.9)]
         optimizer = torch.optim.AdamW(parameters, lr=1e-3, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
-
-
-
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):

@@ -33,7 +33,7 @@ class ProxyProto(torch.nn.Module):
         P = F.normalize(self.proxies, p=2, dim=-1) * self.scaling_p
         if old_proxies.shape[0] > 0:
             O = F.normalize(old_proxies, p=2, dim=-1) * self.scaling_p
-            P = torch.cat((O, P), dim=1)
+            P = torch.cat((O, P), dim=0)
         X = F.normalize(X, p=2, dim=-1) * self.scaling_x
         D = torch.cdist(X, P) ** 2
         T = binarize_and_smooth_labels(T, len(P), self.smoothing_const)
