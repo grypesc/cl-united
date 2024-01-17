@@ -237,8 +237,8 @@ class Appr(Inc_Learning_Appr):
                 train_loss.append(float(bsz * loss))
                 train_kd_loss.append(float(kd_loss))
 
-                if t > 0 and epoch >= 20:
-                    self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=4)
+            if t > 0 and epoch >= 20:
+                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=10)
 
             lr_scheduler.step()
             model.eval()
@@ -246,7 +246,8 @@ class Appr(Inc_Learning_Appr):
             criterion.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
-                    targets -= self.task_offset[t]
+                    if epoch < 20:
+                        targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     old_features = None
