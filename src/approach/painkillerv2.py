@@ -92,7 +92,7 @@ class Adapter(torch.nn.Module):
     def get_optimizer(self, parameters, epochs, lr):
         """Returns the optimizer"""
         milestones = [int(epochs * 0.5)]
-        optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=1e-6)
+        optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -212,7 +212,7 @@ class Appr(Inc_Learning_Appr):
                 print("Warming up the adapter, bitch.")
                 adapter = Adapter(self.adapter_type, self.S, t, self.device)
                 adapter.to(self.device, non_blocking=True)
-                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=50)
+                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=60)
 
             for images, targets in trn_loader:
                 if epoch < 20:
@@ -237,8 +237,8 @@ class Appr(Inc_Learning_Appr):
                 train_loss.append(float(bsz * loss))
                 train_kd_loss.append(float(kd_loss))
 
-            if t > 0 and epoch >= 20:
-                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=10)
+                if t > 0 and epoch >= 20:
+                    self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=4)
 
             lr_scheduler.step()
             model.eval()
@@ -269,8 +269,8 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f}")
 
-        # new_prototypes_new_vals = criterion.proxies.data[-self.S:]
-        # self.prototypes = torch.cat((self.prototypes, new_prototypes), dim=0)
+        if t > 0:
+            self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=100)
 
 
     @torch.no_grad()
