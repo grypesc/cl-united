@@ -14,9 +14,8 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_proto import ProxyProto
-from .criterions.ce import CE
 
-# torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cuda.matmul.allow_tf32 = False
 
 
 class Adapter(torch.nn.Module):
@@ -102,7 +101,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, S=64, adapter="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, S=64, adapter="linear", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -122,11 +121,11 @@ class Appr(Inc_Learning_Appr):
         self.prototypes = torch.empty((0, 0), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.criterion = ProxyProto
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.adapter_type = adapter
-
+        self.contrastive_epoch = 20
+        self.adapter_final_epochs = 100
 
     @staticmethod
     def extra_parser(args):
@@ -177,6 +176,8 @@ class Appr(Inc_Learning_Appr):
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
+        torch.save(self.models, self.logger.exp_path + "/models.pth")
+        torch.save(self.prototypes, self.logger.exp_path + "/protos.pth")
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         for model in self.models:
@@ -197,8 +198,7 @@ class Appr(Inc_Learning_Appr):
         # Expand existing protos, we will add new protos at the very end of this function
         self.prototypes = torch.cat((self.prototypes, torch.zeros((self.prototypes.shape[0], self.S), device=self.device)), dim=1)
 
-
-        criterion = self.criterion(num_classes_in_t, self.S, self.device)
+        criterion = ProxyProto(num_classes_in_t, self.S, self.device, self.smoothing)
         parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
@@ -208,14 +208,14 @@ class Appr(Inc_Learning_Appr):
             distiller.train()
             criterion.train()
 
-            if t > 0 and epoch == 20:
+            if t > 0 and epoch == self.contrastive_epoch:
                 print("Warming up the adapter, bitch.")
                 adapter = Adapter(self.adapter_type, self.S, t, self.device)
                 adapter.to(self.device, non_blocking=True)
-                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=60)
+                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=self.adapter_final_epochs)
 
             for images, targets in trn_loader:
-                if epoch < 20:
+                if epoch < self.contrastive_epoch:
                     targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
@@ -226,19 +226,18 @@ class Appr(Inc_Learning_Appr):
                     with torch.no_grad():
                         old_features = [model(images) for model in self.models[:-1]]
                         old_features = torch.cat(old_features, dim=1)
-                    # features = torch.cat((old_features, features), dim=1)
 
-                loss, _ = criterion(features, targets, self.prototypes[:, -self.S:] if epoch >= 20 and t>0 else None)
+                loss, _ = criterion(features, targets, self.prototypes[:, -self.S:] if epoch >= self.contrastive_epoch and t > 0 else None)
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
 
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
-                train_kd_loss.append(float(kd_loss))
+                train_kd_loss.append(float(bsz * kd_loss))
 
-                if t > 0 and epoch >= 20:
-                    self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=4)
+            if t > 0 and epoch >= self.contrastive_epoch:
+                self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=20)
 
             lr_scheduler.step()
             model.eval()
@@ -246,7 +245,7 @@ class Appr(Inc_Learning_Appr):
             criterion.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
-                    if epoch < 20:
+                    if epoch < self.contrastive_epoch:
                         targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
@@ -255,10 +254,9 @@ class Appr(Inc_Learning_Appr):
                     if t > 0:
                         old_features = [model(images) for model in self.models[:-1]]
                         old_features = torch.cat(old_features, dim=1)
-                        # features = torch.cat((old_features, features), dim=1)
-                    loss, _ = criterion(features, targets, self.prototypes[:, -self.S:] if epoch >= 20 and t > 0 else None)
+                    loss, _ = criterion(features, targets, self.prototypes[:, -self.S:] if epoch >= self.contrastive_epoch and t > 0 else None)
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
-                    valid_kd_loss.append(float(kd_loss))
+                    valid_kd_loss.append(float(bsz * kd_loss))
                     valid_loss.append(float(bsz * loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
@@ -266,11 +264,11 @@ class Appr(Inc_Learning_Appr):
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.2f}")
 
         if t > 0:
-            self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=100)
+            self.prototypes = adapter(trn_loader, val_loader, self.models, self.prototypes, lr=1e-3, epochs=self.adapter_final_epochs)
 
 
     @torch.no_grad()
@@ -345,7 +343,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
-        milestones = [int(self.nepochs * 0.3), int(self.nepochs * 0.6), int(self.nepochs * 0.9)]
+        milestones = [int(self.nepochs * 0.4), int(self.nepochs * 0.8)]
         optimizer = torch.optim.AdamW(parameters, lr=1e-3, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
