@@ -18,6 +18,7 @@ from .criterions.proxy_proto import ProxyProto
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
+
 class Adapter(torch.nn.Module):
     def __init__(self, adapter_type, S, t, device):
         super().__init__()
@@ -30,9 +31,9 @@ class Adapter(torch.nn.Module):
         self.nn = nn.Linear(self.S, self.S, bias=False)
         if adapter_type == "mlp":
             self.nn = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.GELU(),
-                                      nn.Linear(2 * self.S, self.S)
-                                      )
+                                    nn.GELU(),
+                                    nn.Linear(2 * self.S, self.S)
+                                    )
 
     def forward(self, trn_loader, val_loader, model, old_model, prototypes, lr, epochs):
         """ Sets initial weights for the adapter and estimates initial positions of centroids"""
@@ -89,7 +90,7 @@ class Adapter(torch.nn.Module):
     def get_optimizer(self, parameters, epochs, lr):
         """Returns the optimizer"""
         milestones = [int(epochs * 0.4), int(epochs * 0.8)]
-        optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=1e-5)
+        optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -125,10 +126,8 @@ class Appr(Inc_Learning_Appr):
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
 
-        self.adapter_epochs = 20
+        self.adapter_epochs = 30
         self.adapter_final_epochs = 100
-
-
 
     @staticmethod
     def extra_parser(args):
@@ -191,7 +190,6 @@ class Appr(Inc_Learning_Appr):
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
 
-
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
@@ -204,7 +202,7 @@ class Appr(Inc_Learning_Appr):
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyProto(num_classes_in_t, self.S, self.device, smoothing_const=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.lr if t == 0 else 0.1*self.lr, self.wd * (t == 0))
 
         adapter = None
         new_prototypes = None
@@ -212,7 +210,7 @@ class Appr(Inc_Learning_Appr):
             print("Warming up the adapter, bitch.")
             adapter = Adapter(self.distiller_type, self.S, t, self.device)
             adapter.to(self.device, non_blocking=True)
-            new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=1e-3, epochs=self.adapter_final_epochs)
+            new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=1e-1, epochs=self.adapter_final_epochs)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -226,6 +224,8 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
+                if epoch < 3:
+                    features.detach()
 
                 loss, _ = criterion(features, targets, new_prototypes)
                 with torch.no_grad():
@@ -242,7 +242,7 @@ class Appr(Inc_Learning_Appr):
             lr_scheduler.step()
 
             if t > 0:
-                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, new_prototypes, lr=1e-3, epochs=self.adapter_epochs)
+                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, new_prototypes, lr=1e-2, epochs=self.adapter_epochs)
 
             self.model.eval()
             self.old_model.eval()
@@ -255,7 +255,7 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, _ = criterion(features, targets, new_prototypes)
-                    old_features = self.old_model(images) if t>0 else None
+                    old_features = self.old_model(images) if t > 0 else None
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
 
                     valid_loss.append(float(bsz * loss))
@@ -266,14 +266,11 @@ class Appr(Inc_Learning_Appr):
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
 
-
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} ")
 
         if t > 0:
-            self.adapt_prototypes(t, trn_loader, val_loader, adapter)
-
-
+            self.adapt_prototypes(trn_loader, val_loader, adapter)
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -307,10 +304,9 @@ class Appr(Inc_Learning_Appr):
             new_centroids[c] = centroid
         self.prototypes = torch.cat((self.prototypes, new_centroids))
 
-
-    def adapt_prototypes(self, t, trn_loader, val_loader, adapter):
+    def adapt_prototypes(self, trn_loader, val_loader, adapter):
         old_prototypes = copy.deepcopy(self.prototypes)
-        self.prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, lr=1e-3, epochs=self.adapter_final_epochs)
+        self.prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, lr=1e-1, epochs=self.adapter_final_epochs)
 
         # Evaluation
         with torch.no_grad():
@@ -343,7 +339,6 @@ class Appr(Inc_Learning_Appr):
                 print(f"Old {subset} distance: {old_dist.mean():.2f} ± {old_dist.std():.2f}")
                 print(f"New {subset} distance: {new_dist.mean():.2f} ± {new_dist.std():.2f}")
 
-
     @torch.no_grad()
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
@@ -371,13 +366,11 @@ class Appr(Inc_Learning_Appr):
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-
-    def get_optimizer(self, parameters, wd, milestones=[30, 60, 90]):
+    def get_optimizer(self, parameters, lr, wd, milestones=(40, 80)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
-
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
