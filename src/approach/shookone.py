@@ -254,7 +254,7 @@ class Appr(Inc_Learning_Appr):
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} ")
 
             if t > 0:
-                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, new_prototypes, lr=1e-2, epochs=self.adapter_epochs)
+                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=1e-2, epochs=self.adapter_epochs)
 
         if t > 0:
             self.adapt_prototypes(trn_loader, val_loader, adapter)
