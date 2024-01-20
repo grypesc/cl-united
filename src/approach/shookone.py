@@ -28,7 +28,7 @@ class Adapter(torch.nn.Module):
         self.t = t
         self.device = device
 
-        self.nn = nn.Linear(self.S, self.S, bias=False)
+        self.nn = nn.Linear(self.S, self.S)
         if adapter_type == "mlp":
             self.nn = nn.Sequential(nn.Linear(self.S, 2 * self.S),
                                     nn.GELU(),
@@ -68,7 +68,6 @@ class Adapter(torch.nn.Module):
                     images = images.to(self.device, non_blocking=True)
                     target = model(images)
                     features = old_model(images)
-
                     adapted_features = self.nn(features)
                     loss = F.mse_loss(adapted_features, target)
                     valid_loss.append(float(bsz * loss))
@@ -100,13 +99,11 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, S=64, distiller="linear", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
 
-        self.N = N
-        self.K = K
         self.S = S
         self.alpha = alpha
         self.smoothing = smoothing
@@ -126,21 +123,13 @@ class Appr(Inc_Learning_Appr):
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
 
-        self.adapter_epochs = 30
+        self.adapter_epochs = 20
         self.adapter_final_epochs = 100
 
     @staticmethod
     def extra_parser(args):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
-        parser.add_argument('--N',
-                            help='Number of learners',
-                            type=int,
-                            default=10)
-        parser.add_argument('--K',
-                            help='number of learners sampled for task',
-                            type=int,
-                            default=3)
         parser.add_argument('--S',
                             help='latent space size',
                             type=int,
@@ -180,6 +169,7 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
         self.old_model = copy.deepcopy(self.model)
+        self.old_model.eval()
 
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
@@ -216,7 +206,6 @@ class Appr(Inc_Learning_Appr):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
 
             self.model.train()
-            self.old_model.train()
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
@@ -224,8 +213,8 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 3:
-                    features.detach()
+                if t > 0 and epoch < 10:
+                    features = features.detach()
 
                 loss, _ = criterion(features, targets, new_prototypes)
                 with torch.no_grad():
@@ -245,7 +234,6 @@ class Appr(Inc_Learning_Appr):
                 new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, new_prototypes, lr=1e-2, epochs=self.adapter_epochs)
 
             self.model.eval()
-            self.old_model.eval()
             criterion.eval()
             distiller.eval()
             with torch.no_grad():
@@ -277,7 +265,6 @@ class Appr(Inc_Learning_Appr):
         """ Create distributions for task t"""
         self.model.eval()
         transforms = val_loader.dataset.transform
-        model = self.model
         new_centroids = torch.zeros((num_classes_in_t, self.S), device=self.device)
         for c in range(num_classes_in_t):
             train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
@@ -293,9 +280,9 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = model(images)
+                features = self.model(images)
                 class_features[from_: from_+bsz] = features
-                features = model(torch.flip(images, dims=(3,)))
+                features = self.model(torch.flip(images, dims=(3,)))
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
