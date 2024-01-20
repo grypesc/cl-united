@@ -209,13 +209,11 @@ class Appr(Inc_Learning_Appr):
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
-                bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
                 if t > 0 and epoch < 10:
                     features = features.detach()
-
                 loss, _ = criterion(features, targets, new_prototypes)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
@@ -226,26 +224,24 @@ class Appr(Inc_Learning_Appr):
                 torch.nn.utils.clip_grad_norm_(distiller.parameters(), self.clipgrad)
                 optimizer.step()
 
+                bsz = images.shape[0]
                 train_loss.append(float(bsz * loss))
                 train_kd_loss.append(float(bsz * kd_loss))
+
             lr_scheduler.step()
-
-            if t > 0:
-                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, new_prototypes, lr=1e-2, epochs=self.adapter_epochs)
-
             self.model.eval()
             criterion.eval()
             distiller.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
-                    bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, _ = criterion(features, targets, new_prototypes)
                     old_features = self.old_model(images) if t > 0 else None
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
 
+                    bsz = images.shape[0]
                     valid_loss.append(float(bsz * loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
 
@@ -256,6 +252,9 @@ class Appr(Inc_Learning_Appr):
 
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} ")
+
+            if t > 0:
+                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, new_prototypes, lr=1e-2, epochs=self.adapter_epochs)
 
         if t > 0:
             self.adapt_prototypes(trn_loader, val_loader, adapter)
