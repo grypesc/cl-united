@@ -234,7 +234,6 @@ class Appr(Inc_Learning_Appr):
             distiller.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
-                    targets -= self.task_offset[t]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, _ = criterion(features, targets, new_prototypes)
