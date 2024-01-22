@@ -40,7 +40,6 @@ class Adapter(torch.nn.Module):
         optimizer, lr_scheduler = self.get_optimizer(self.nn.parameters(), epochs, lr)
 
         model.eval()
-        old_model.eval()
         for epoch in range(epochs):
             train_loss, valid_loss = [], []
             self.nn.train()
@@ -99,7 +98,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, S=64, distiller="linear", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, S=64, pseudo_contrast=False, distiller="linear", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -122,6 +121,7 @@ class Appr(Inc_Learning_Appr):
         self.classes_in_tasks = []
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
+        self.pseudo_contrast = pseudo_contrast
 
         self.adapter_epochs = 20
         self.adapter_final_epochs = 100
@@ -147,6 +147,10 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["identity", "relu", "lrelu"],
                             default="relu")
+        parser.add_argument('--pseudo-contrast',
+                            help='Include old centroids in proxy loss',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--distiller',
                             help='Distiller',
                             type=str,
@@ -214,6 +218,9 @@ class Appr(Inc_Learning_Appr):
                 features = self.model(images)
                 if t > 0 and epoch < 10:
                     features = features.detach()
+                if not self.pseudo_contrast:
+                    new_prototypes = None
+                    targets -= self.task_offset[t]
                 loss, _ = criterion(features, targets, new_prototypes)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
@@ -236,6 +243,9 @@ class Appr(Inc_Learning_Appr):
                 for images, targets in val_loader:
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
+                    if not self.pseudo_contrast:
+                        new_prototypes = None
+                        targets -= self.task_offset[t]
                     loss, _ = criterion(features, targets, new_prototypes)
                     old_features = self.old_model(images) if t > 0 else None
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
@@ -288,6 +298,11 @@ class Appr(Inc_Learning_Appr):
             centroid = class_features.mean(dim=0)
             new_centroids[c] = centroid
         self.prototypes = torch.cat((self.prototypes, new_centroids))
+
+        print("Proto norm statistics:")
+        protos = torch.norm(self.prototypes, dim=1)
+        print(f"Mean: {protos.mean():.2f}, median: {protos.median():.2f}")
+        print(f"Range: [{protos.min():.2f}; {protos.max():.2f}]")
 
     def adapt_prototypes(self, trn_loader, val_loader, adapter):
         old_prototypes = copy.deepcopy(self.prototypes)
