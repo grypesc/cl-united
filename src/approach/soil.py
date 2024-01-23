@@ -90,7 +90,7 @@ class Appr(Inc_Learning_Appr):
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="linear")
+                            default="mlp")
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
@@ -128,11 +128,11 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
-        distiller = nn.Linear(self.S, self.S, bias=False)
+        distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
-            distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S, bias=False),
+            distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
                                       nn.LeakyReLU(),
-                                      nn.Linear(2 * self.S, self.S, bias=False)
+                                      nn.Linear(2 * self.S, self.S)
                                       )
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
