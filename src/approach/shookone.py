@@ -31,7 +31,7 @@ class Adapter(torch.nn.Module):
         self.nn = nn.Linear(self.S, self.S)
         if adapter_type == "mlp":
             self.nn = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                    nn.GELU(),
+                                    nn.LeakyReLU(),
                                     nn.Linear(2 * self.S, self.S)
                                     )
 
@@ -74,7 +74,7 @@ class Adapter(torch.nn.Module):
                 train_loss = sum(train_loss) / len(trn_loader.dataset)
                 valid_loss = sum(valid_loss) / len(val_loader.dataset)
 
-            print(f"\tAdapter: {epoch} Train: {100 * train_loss:.2f} Val: {100 * valid_loss:.2f}")
+            print(f"\tAdapter: {epoch} Train: {train_loss:.3f} Val: {valid_loss:.3f}")
         return self.adapt_prototypes(prototypes)
 
     @torch.no_grad()
@@ -98,7 +98,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, S=64, pseudo_contrast=False, distiller="linear", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, S=64, pseudo_contrast=False, distiller="mlp", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -106,7 +106,6 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.alpha = alpha
         self.smoothing = smoothing
-        self.patience = patience
         self.old_model = None
         self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
                       "resnet14": resnet14(num_features=S, activation_function=activation_function),
@@ -123,7 +122,7 @@ class Appr(Inc_Learning_Appr):
         self.svals_explained_by = []
         self.pseudo_contrast = pseudo_contrast
 
-        self.adapter_epochs = 20
+        self.adapter_epochs = 30
         self.adapter_final_epochs = 100
 
     @staticmethod
@@ -155,7 +154,7 @@ class Appr(Inc_Learning_Appr):
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="linear")
+                            default="mlp")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -179,10 +178,16 @@ class Appr(Inc_Learning_Appr):
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
 
-        print("### Creating new prototypes ###")
+        print("### Creating new centroids ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
+
+        print("### Adapting old centroids ###")
+        if t > 0:
+            self.adapt_prototypes(t, trn_loader, val_loader)
+
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
+
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
@@ -190,23 +195,21 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.GELU(),
+                                      nn.LeakyReLU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyProto(num_classes_in_t, self.S, self.device, smoothing_const=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.lr if t == 0 else 0.1*self.lr, self.wd * (t == 0))
-
-        adapter = None
         new_prototypes = None
-        if t > 0:
-            print("Warming up the adapter, bitch.")
-            adapter = Adapter(self.distiller_type, self.S, t, self.device)
-            adapter.to(self.device, non_blocking=True)
-            new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=1e-1, epochs=self.adapter_final_epochs)
 
         for epoch in range(self.nepochs):
+            if t > 0:
+                adapter = Adapter(self.distiller_type, self.S, t, self.device)
+                adapter.to(self.device, non_blocking=True)
+                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=0.01, epochs=self.adapter_epochs)
+
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
 
             self.model.train()
@@ -216,19 +219,17 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and epoch < 10:
-                    features = features.detach()
-                if not self.pseudo_contrast:
-                    new_prototypes = None
-                    targets -= self.task_offset[t]
+                # if t > 0 and epoch < 10:
+                #     features = features.detach()
+                # if not self.pseudo_contrast:
+                #     new_prototypes = None
+                #     targets -= self.task_offset[t]
                 loss, _ = criterion(features, targets, new_prototypes)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
-                torch.nn.utils.clip_grad_norm_(criterion.parameters(), self.clipgrad)
-                torch.nn.utils.clip_grad_norm_(distiller.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
 
                 bsz = images.shape[0]
@@ -243,9 +244,9 @@ class Appr(Inc_Learning_Appr):
                 for images, targets in val_loader:
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
-                    if not self.pseudo_contrast:
-                        new_prototypes = None
-                        targets -= self.task_offset[t]
+                    # if not self.pseudo_contrast:
+                    #     new_prototypes = None
+                    #     targets -= self.task_offset[t]
                     loss, _ = criterion(features, targets, new_prototypes)
                     old_features = self.old_model(images) if t > 0 else None
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
@@ -262,11 +263,6 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} ")
 
-            if t > 0:
-                new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=1e-2, epochs=self.adapter_epochs)
-
-        if t > 0:
-            self.adapt_prototypes(trn_loader, val_loader, adapter)
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -304,9 +300,11 @@ class Appr(Inc_Learning_Appr):
         print(f"Mean: {protos.mean():.2f}, median: {protos.median():.2f}")
         print(f"Range: [{protos.min():.2f}; {protos.max():.2f}]")
 
-    def adapt_prototypes(self, trn_loader, val_loader, adapter):
+    def adapt_prototypes(self, t, trn_loader, val_loader):
         old_prototypes = copy.deepcopy(self.prototypes)
-        self.prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, lr=1e-1, epochs=self.adapter_final_epochs)
+        adapter = Adapter(self.distiller_type, self.S, t, self.device)
+        adapter.to(self.device, non_blocking=True)
+        self.prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, lr=0.01, epochs=self.adapter_final_epochs)
 
         # Evaluation
         with torch.no_grad():
