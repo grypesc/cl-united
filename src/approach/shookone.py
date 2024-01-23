@@ -178,12 +178,12 @@ class Appr(Inc_Learning_Appr):
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
 
-        print("### Creating new centroids ###")
-        self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
-
         print("### Adapting old centroids ###")
         if t > 0:
             self.adapt_prototypes(t, trn_loader, val_loader)
+
+        print("### Creating new centroids ###")
+        self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
 
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
