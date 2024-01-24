@@ -296,9 +296,9 @@ class Appr(Inc_Learning_Appr):
         self.prototypes = torch.cat((self.prototypes, new_centroids))
 
         print("Proto norm statistics:")
-        protos = torch.norm(self.prototypes, dim=1)
-        print(f"Mean: {protos.mean():.2f}, median: {protos.median():.2f}")
-        print(f"Range: [{protos.min():.2f}; {protos.max():.2f}]")
+        norms = torch.norm(self.prototypes, dim=1)
+        print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
+        print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         old_prototypes = copy.deepcopy(self.prototypes)
