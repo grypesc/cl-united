@@ -200,8 +200,16 @@ class Appr(Inc_Learning_Appr):
                                       )
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyProto(num_classes_in_t, self.S, self.device, smoothing_const=self.smoothing)
+
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.lr if t == 0 else 0.1*self.lr, self.wd * (t == 0))
+        param_groups = [
+            {'params': list(self.model.parameters()), 'lr': float(self.lr)},
+            {'params': list(distiller.parameters()), 'lr': float(self.lr)},
+            {'params': list(criterion.parameters()), 'lr': float(self.lr) * 10},
+        ]
+
+
+        optimizer, lr_scheduler = self.get_optimizer(param_groups, self.lr if t == 0 else 0.1*self.lr, self.wd * (t == 0))
         new_prototypes = None
 
         for epoch in range(self.nepochs):
