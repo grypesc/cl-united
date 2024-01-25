@@ -219,11 +219,11 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                # if t > 0 and epoch < 10:
-                #     features = features.detach()
-                # if not self.pseudo_contrast:
-                #     new_prototypes = None
-                #     targets -= self.task_offset[t]
+                if t > 0 and epoch < 5:
+                    features = features.detach()
+                if not self.pseudo_contrast:
+                    new_prototypes = None
+                    targets -= self.task_offset[t]
                 loss, _ = criterion(features, targets, new_prototypes)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
@@ -244,9 +244,9 @@ class Appr(Inc_Learning_Appr):
                 for images, targets in val_loader:
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
-                    # if not self.pseudo_contrast:
-                    #     new_prototypes = None
-                    #     targets -= self.task_offset[t]
+                    if not self.pseudo_contrast:
+                        new_prototypes = None
+                        targets -= self.task_offset[t]
                     loss, _ = criterion(features, targets, new_prototypes)
                     old_features = self.old_model(images) if t > 0 else None
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
