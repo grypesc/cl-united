@@ -31,7 +31,7 @@ class Adapter(torch.nn.Module):
         self.nn = nn.Linear(self.S, self.S)
         if adapter_type == "mlp":
             self.nn = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                    nn.LeakyReLU(),
+                                    nn.GELU(),
                                     nn.Linear(2 * self.S, self.S)
                                     )
 
@@ -82,12 +82,11 @@ class Adapter(torch.nn.Module):
         # Calculate new dimension values for old prototypes
         self.nn.eval()
         prototypes = self.nn(prototypes)
-        self.nn.train()
         return prototypes
 
     def get_optimizer(self, parameters, epochs, lr):
         """Returns the optimizer"""
-        milestones = [int(epochs * 0.4), int(epochs * 0.8)]
+        milestones = [int(epochs * 0.9)]
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
@@ -97,13 +96,15 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
-                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 momentum=0.9, wd=0, temperature=1.0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, S=64, pseudo_contrast=False, distiller="mlp", alpha=0.5, smoothing=0.1, sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
 
         self.S = S
+        self.momentum = momentum
+        self.temperature = temperature
         self.alpha = alpha
         self.smoothing = smoothing
         self.old_model = None
@@ -159,6 +160,10 @@ class Appr(Inc_Learning_Appr):
                             help='label smoothing',
                             type=float,
                             default=0.1)
+        parser.add_argument('--temperature',
+                            help='proxy temp',
+                            type=float,
+                            default=1.0)
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32"],
@@ -195,25 +200,25 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.LeakyReLU(),
+                                      nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
         distiller.to(self.device, non_blocking=True)
-        criterion = ProxyProto(num_classes_in_t, self.S, self.device, smoothing_const=self.smoothing)
+        criterion = ProxyProto(num_classes_in_t, self.S, self.device, smoothing=self.smoothing, temperature=self.temperature)
 
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
+        lr = self.lr if t == 0 else 0.1*self.lr
         param_groups = [
-            {'params': list(self.model.parameters()), 'lr': float(self.lr)},
-            {'params': list(distiller.parameters()), 'lr': float(self.lr)},
-            {'params': list(criterion.parameters()), 'lr': float(self.lr) * 10},
+            {'params': list(self.model.parameters()), 'lr': float(lr)},
+            {'params': list(distiller.parameters()), 'lr': float(lr)},
+            {'params': list(criterion.parameters()), 'lr': float(lr)},
         ]
 
-
-        optimizer, lr_scheduler = self.get_optimizer(param_groups, self.lr if t == 0 else 0.1*self.lr, self.wd * (t == 0))
+        optimizer, lr_scheduler = self.get_optimizer(param_groups, lr, self.wd, t, self.nepochs)
         new_prototypes = None
 
         for epoch in range(self.nepochs):
-            if t > 0:
+            if t > 0 and self.pseudo_contrast:
                 adapter = Adapter(self.distiller_type, self.S, t, self.device)
                 adapter.to(self.device, non_blocking=True)
                 new_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, copy.deepcopy(self.prototypes), lr=0.01, epochs=self.adapter_epochs)
@@ -227,8 +232,8 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and epoch < 5:
-                    features = features.detach()
+                # if t > 0 and epoch < 5:
+                #     features = features.detach()
                 if not self.pseudo_contrast:
                     new_prototypes = None
                     targets -= self.task_offset[t]
@@ -372,9 +377,12 @@ class Appr(Inc_Learning_Appr):
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-    def get_optimizer(self, parameters, lr, wd, milestones=(40, 80)):
-        """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
+    def get_optimizer(self, parameters, lr, wd, t, epochs):
+        milestones = (int(0.4*epochs), int(0.8*epochs))
+        if t > 0:
+            milestones = (int(0.6 * epochs), )
+            wd = 0.
+        optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=self.momentum)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
