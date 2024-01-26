@@ -237,8 +237,12 @@ def main(argv=None):
     print(taskcla)
     acc_taw = np.zeros((max_task, max_task))
     acc_tag = np.zeros((max_task, max_task))
+    train_acc_taw = np.zeros((max_task, max_task))
+    train_acc_tag = np.zeros((max_task, max_task))
     forg_taw = np.zeros((max_task, max_task))
     forg_tag = np.zeros((max_task, max_task))
+    train_forg_taw = np.zeros((max_task, max_task))
+    train_forg_tag = np.zeros((max_task, max_task))
     for t, (_, ncla) in enumerate(taskcla):
         # Early stop tasks if flag
         if t >= max_task:
@@ -281,6 +285,16 @@ def main(argv=None):
 
         # Test
         for u in range(t + 1):
+
+            _, train_acc_taw[t, u], train_acc_tag[t, u] = appr.eval(u, trn_loader[u])
+            if u < t:
+                train_forg_taw[t, u] = train_acc_taw[:t, u].max(0) - train_acc_taw[t, u]
+                train_forg_tag[t, u] = train_acc_tag[:t, u].max(0) - train_acc_tag[t, u]
+            print('>>> Train on task {:2d} : loss={:.3f} | TAw acc={:5.1f}%, forg={:5.1f}%'
+                  '| TAg acc={:5.1f}%, forg={:5.1f}% <<<'.format(u, 0,
+                                                                 100 * train_acc_taw[t, u], 100 * train_forg_taw[t, u],
+                                                                 100 * train_acc_tag[t, u], 100 * train_forg_tag[t, u]))
+
             test_loss, acc_taw[t, u], acc_tag[t, u] = appr.eval(u, tst_loader[u])
             if u < t:
                 forg_taw[t, u] = acc_taw[:t, u].max(0) - acc_taw[t, u]
@@ -319,6 +333,9 @@ def main(argv=None):
             logger.log_figure(name='weights', iter=t, figure=weights)
             logger.log_figure(name='bias', iter=t, figure=biases)
     # Print Summary
+    print("Train:")
+    utils.print_summary(train_acc_taw, train_acc_tag, train_forg_taw, train_forg_tag)
+    print("Test:")
     utils.print_summary(acc_taw, acc_tag, forg_taw, forg_tag)
     print('[Elapsed time = {:.1f} h]'.format((time.time() - tstart) / (60 * 60)))
     print('Done!')
