@@ -232,8 +232,8 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                # if t > 0 and epoch < 5:
-                #     features = features.detach()
+                if t > 0 and epoch < 5:
+                    features = features.detach()
                 if not self.pseudo_contrast:
                     new_prototypes = None
                     targets -= self.task_offset[t]
