@@ -14,7 +14,7 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_proto import ProxyProto
-
+from .criterions.proxy_yolo import ProxyYolo
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
@@ -204,7 +204,7 @@ class Appr(Inc_Learning_Appr):
                                       nn.Linear(2 * self.S, self.S)
                                       )
         distiller.to(self.device, non_blocking=True)
-        criterion = ProxyProto(num_classes_in_t, self.S, self.device, smoothing=self.smoothing, temperature=self.temperature)
+        criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=self.smoothing, temperature=self.temperature)
 
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         lr = self.lr if t == 0 else 0.1*self.lr
