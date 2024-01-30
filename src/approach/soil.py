@@ -9,6 +9,7 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
+from .criterions.abc import ABCLoss
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
@@ -42,11 +43,12 @@ class Appr(Inc_Learning_Appr):
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
-        self.prototypes = {}
+        self.prototypes = torch.empty((0, self.S), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"proxy-nca": ProxyNCA,
-                          "ce" : CE}[criterion]
+                          "ce" : CE,
+                          "abc": ABCLoss}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -123,6 +125,11 @@ class Appr(Inc_Learning_Appr):
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
+
+        print("Proto norm statistics:")
+        norms = torch.norm(self.prototypes, dim=1)
+        print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
+        print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
 
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -206,9 +213,9 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         transforms = val_loader.dataset.transform
         model = self.model
+        new_protos = torch.zeros((num_classes_in_t, self.S), device=self.device)
         for c in range(num_classes_in_t):
-            c = c + self.task_offset[t]
-            train_indices = torch.tensor(trn_loader.dataset.labels) == c
+            train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
             if isinstance(trn_loader.dataset.images, list):
                 train_images = list(compress(trn_loader.dataset.images, train_indices))
                 ds = ClassDirectoryDataset(train_images, transforms)
@@ -229,7 +236,9 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate centroid
             centroid = class_features.mean(dim=0)
-            self.prototypes[c] = centroid
+            new_protos[c] = centroid
+
+        self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
 
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
@@ -280,8 +289,7 @@ class Appr(Inc_Learning_Appr):
         # Calculate new prototypes
         with torch.no_grad():
             adapter.eval()
-            for c, prototype in self.prototypes.items():
-                self.prototypes[c] = adapter(prototype)
+            self.prototypes = adapter(self.prototypes)
 
             # Evaluation
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
@@ -318,14 +326,13 @@ class Appr(Inc_Learning_Appr):
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
         self.model.eval()
-        prototypes = torch.stack(list(self.prototypes.values()))
-        tag_acc = Accuracy("multiclass", num_classes=prototypes.shape[0])
+        tag_acc = Accuracy("multiclass", num_classes=self.prototypes.shape[0])
         taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
         offset = self.task_offset[t]
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
             features = self.model(images)
-            dist = torch.cdist(features, prototypes)
+            dist = torch.cdist(features, self.prototypes)
             tag_preds = torch.argmin(dist, dim=1)
             taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
 
@@ -336,7 +343,6 @@ class Appr(Inc_Learning_Appr):
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
     def distill_knowledge(self, loss, features, distiller, old_features=None):
-        """Returns loss ce with kd"""
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(distiller(features), old_features)
