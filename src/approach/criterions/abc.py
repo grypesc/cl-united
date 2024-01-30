@@ -24,16 +24,16 @@ class ABCLoss(torch.nn.Module):
     def forward(self, X, T, old_proxies=None):
         bsz = X.shape[0]
         D = torch.cdist(X, self.proxies)
-        poss_D = torch.gather(D, 1, T.unsqueeze(1)).squeeze(1)
+        pos_D = torch.gather(D, 1, T.unsqueeze(1)).squeeze(1)
         T = binarize_and_smooth_labels(T, len(self.proxies), 0)
         neg_D = D[~T.bool()].reshape(bsz, -1)
-        loss_pull = poss_D ** 2
-        loss_push = ((neg_D - 1) ** 2).mean(1)
+        loss_pull = pos_D ** 2
+        loss_push = ((neg_D - self.margin) ** 2).mean(1)
         loss_push_old = 0
 
         if old_proxies is not None:
             D = torch.cdist(X, old_proxies)
-            loss_push_old = ((D - 1) ** 2).mean(1)
+            loss_push_old = ((D - self.margin) ** 2).mean(1)
 
         loss = (loss_pull + loss_push + loss_push_old).mean()
         return loss, None

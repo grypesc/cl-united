@@ -114,6 +114,7 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
         self.old_model = copy.deepcopy(self.model)
+        self.old_model.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
@@ -141,6 +142,14 @@ class Appr(Inc_Learning_Appr):
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
+        # Freeze batch norms
+        if t > 0:
+            for m in self.model.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+                    m.weight.requires_grad = False
+                    m.bias.requires_grad = False
+
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
@@ -150,7 +159,6 @@ class Appr(Inc_Learning_Appr):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
-            self.old_model.train()
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
@@ -166,9 +174,7 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images) if t > 0 else None
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
-                torch.nn.utils.clip_grad_norm_(criterion.parameters(), self.clipgrad)
-                torch.nn.utils.clip_grad_norm_(distiller.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
@@ -177,7 +183,6 @@ class Appr(Inc_Learning_Appr):
             lr_scheduler.step()
 
             self.model.eval()
-            self.old_model.eval()
             criterion.eval()
             distiller.eval()
             with torch.no_grad():
@@ -243,7 +248,6 @@ class Appr(Inc_Learning_Appr):
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
-        self.old_model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
@@ -335,7 +339,6 @@ class Appr(Inc_Learning_Appr):
             dist = torch.cdist(features, self.prototypes)
             tag_preds = torch.argmin(dist, dim=1)
             taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
-
 
             tag_acc.update(tag_preds.cpu(), target)
             taw_acc.update(taw_preds.cpu(), target)
