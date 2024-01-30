@@ -297,7 +297,7 @@ class Appr(Inc_Learning_Appr):
                 class_images = np.concatenate([dl.dataset.images for dl in loaders])
                 labels = np.concatenate([dl.dataset.labels for dl in loaders])
 
-                for c in list(old_prototypes.keys()):
+                for c in range(old_prototypes.shape[0]):
                     train_indices = torch.tensor(labels) == c
                     ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
                     loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
