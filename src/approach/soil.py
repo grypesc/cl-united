@@ -82,7 +82,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--adapt',
                             help='Adapt prototypes',
                             action='store_true',
-                            default=False)
+                            default=True)
         parser.add_argument('--activation-function',
                             help='Activation functions in resnet',
                             type=str,
@@ -96,7 +96,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca"],
+                            choices=["ce", "proxy-nca", "abc"],
                             default="proxy-nca")
         parser.add_argument('--smoothing',
                             help='label smoothing',
