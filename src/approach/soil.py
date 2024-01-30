@@ -131,7 +131,7 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.LeakyReLU(),
+                                      nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
         distiller.to(self.device, non_blocking=True)
@@ -238,7 +238,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.LeakyReLU(),
+                                      nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
         adapter.to(self.device, non_blocking=True)
