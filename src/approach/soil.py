@@ -132,7 +132,6 @@ class Appr(Inc_Learning_Appr):
         print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
         print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
 
-
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
@@ -167,8 +166,8 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                # if epoch < 3:
-                #     features = features.detach()
+                if epoch < 5:
+                    features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
@@ -211,7 +210,6 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
-
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
         """ Create distributions for task t"""
@@ -244,7 +242,6 @@ class Appr(Inc_Learning_Appr):
             new_protos[c] = centroid
 
         self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
-
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
@@ -325,7 +322,6 @@ class Appr(Inc_Learning_Appr):
                 print(f"Old {subset} distance: {old_dist.mean():.2f} ± {old_dist.std():.2f}")
                 print(f"New {subset} distance: {new_dist.mean():.2f} ± {new_dist.std():.2f}")
 
-
     @torch.no_grad()
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
@@ -354,13 +350,11 @@ class Appr(Inc_Learning_Appr):
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-
     def get_optimizer(self, parameters, wd, milestones=(40, 80)):
         """Returns the optimizer"""
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
-
 
     def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
         """Returns the optimizer"""
