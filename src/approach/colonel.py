@@ -23,7 +23,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10, K=3, S=64, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -47,6 +47,7 @@ class Appr(Inc_Learning_Appr):
         self.prototypes_class = torch.empty((0, ), dtype=torch.int, device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
+        self.head_type = head
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -90,7 +91,12 @@ class Appr(Inc_Learning_Appr):
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="mlp")
+                            default="linear")
+        parser.add_argument('--head',
+                            help='head',
+                            type=str,
+                            choices=["linear", "mlp"],
+                            default="linear")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -143,10 +149,12 @@ class Appr(Inc_Learning_Appr):
                                       nn.Linear(2 * self.S, self.S)
                                       )
 
-        head = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                             nn.GELU(),
-                             nn.Linear(2 * self.S, num_classes_in_t)
-                             )
+        head = nn.Linear(self.S, num_classes_in_t)
+        if self.head_type == "mlp":
+            head = nn.Sequential(nn.Linear(self.S, 4 * self.S),
+                                 nn.GELU(),
+                                 nn.Linear(4 * self.S, num_classes_in_t)
+                                 )
 
         distiller.to(self.device, non_blocking=True)
         head.to(self.device)
@@ -165,7 +173,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 5 and t > 0:
+                if epoch < 10 and t > 0:
                     features = features.detach()
                 logits = head(features)
                 loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=0.)
@@ -225,7 +233,7 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=True)
             from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+            class_features = torch.full((len(ds), self.S), fill_value=-999999999.0, device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
@@ -242,9 +250,9 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
-            adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+            adapter = nn.Sequential(nn.Linear(self.S, 4 * self.S),
                                     nn.GELU(),
-                                    nn.Linear(2 * self.S, self.S)
+                                    nn.Linear(4 * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
@@ -291,16 +299,16 @@ class Appr(Inc_Learning_Appr):
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
         self.model.eval()
-        tag_acc = Accuracy("multiclass", num_classes=self.prototypes.shape[0])
+        tag_acc = Accuracy("multiclass", num_classes=sum(self.classes_in_tasks))
         taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
-        offset = self.task_offset[t]
+        offset = self.task_offset[t] * self.N
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
             features = self.model(images)
             dist = torch.cdist(features, self.prototypes)
             idx = torch.argmin(dist, dim=1)
             tag_preds = self.prototypes_class[idx]
-            idx = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
+            idx = torch.argmin(dist[:, offset: offset + self.N * self.classes_in_tasks[t]], dim=1) + offset
             taw_preds = self.prototypes_class[idx]
 
             tag_acc.update(tag_preds.cpu(), target)
