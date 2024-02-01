@@ -186,9 +186,10 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
                 if t > 0:
-                    adapted_protos = distiller(self.prototypes)
+                    with torch.no_grad():
+                        adapted_protos = distiller(self.prototypes)
                     dist = torch.cdist(adapted_features, adapted_protos)
-                    dist = torch.topk(dist, 3, 1, largest=False)[0]
+                    dist = torch.topk(dist, 11, 1, largest=False)[0]
                     dist = torch.sqrt(dist) / self.beta
                     loss += -dist.mean()
                 total_loss, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
