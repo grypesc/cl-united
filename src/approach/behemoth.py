@@ -141,6 +141,13 @@ class Appr(Inc_Learning_Appr):
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
+        adapter = nn.Linear(self.S, self.S)
+        if self.distiller_type == "mlp":
+            adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+                                      nn.GELU(),
+                                      nn.Linear(2 * self.S, self.S)
+                                      )
+        adapter.to(self.device)
         # Freeze batch norms
         if t > 0:
             for m in self.model.modules():
@@ -151,7 +158,7 @@ class Appr(Inc_Learning_Appr):
 
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
-        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
+        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(adapter.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
 
         for epoch in range(self.nepochs):
@@ -160,18 +167,28 @@ class Appr(Inc_Learning_Appr):
             self.model.train()
             criterion.train()
             distiller.train()
+            adapter.train()
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 5:
+                if epoch < 10:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                adapted_features = distiller(features) if t > 0 else None
+                adapted_adapted_features = adapter(adapted_features) if t > 0 else None
+                if t > 0:
+                    loss += nn.functional.mse_loss(adapted_adapted_features, features)
+                    dist = torch.cdist(features, adapter(self.prototypes))
+                    dist = torch.topk(dist, 3, 1, largest=False)[0]
+                    dist = torch.sqrt(dist) / self.N
+                    loss += -dist.mean()
+
+                total_loss, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
@@ -184,6 +201,7 @@ class Appr(Inc_Learning_Appr):
             self.model.eval()
             criterion.eval()
             distiller.eval()
+            adapter.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
@@ -192,8 +210,8 @@ class Appr(Inc_Learning_Appr):
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
                     old_features = self.old_model(images) if t>0 else None
-
-                    _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                    adapted_features = distiller(features) if t > 0 else None
+                    _, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
@@ -341,10 +359,10 @@ class Appr(Inc_Learning_Appr):
 
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
-    def distill_knowledge(self, loss, features, distiller, old_features=None):
+    def distill_knowledge(self, loss, adapted_features, old_features=None):
         if old_features is None:
             return loss, 0
-        kd_loss = nn.functional.mse_loss(distiller(features), old_features)
+        kd_loss = nn.functional.mse_loss(adapted_features, old_features)
         if self.criterion.__name__ == "ABCLoss":
             kd_loss *= 1000
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
