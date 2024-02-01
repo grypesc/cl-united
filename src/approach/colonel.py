@@ -65,7 +65,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
-                            default=11)
+                            default=21)
         parser.add_argument('--S',
                             help='latent space size',
                             type=int,
@@ -145,14 +145,14 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.GELU(),
+                                      nn.ReLU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
 
         head = nn.Linear(self.S, num_classes_in_t)
         if self.head_type == "mlp":
             head = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                 nn.GELU(),
+                                 nn.ReLU(),
                                  nn.Linear(2 * self.S, num_classes_in_t)
                                  )
 
@@ -251,7 +251,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                    nn.GELU(),
+                                    nn.ReLU(),
                                     nn.Linear(2 * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
