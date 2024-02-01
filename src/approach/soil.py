@@ -62,7 +62,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--N',
                             help='Number of learners',
                             type=int,
-                            default=10)
+                            default=100)
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
@@ -171,6 +171,16 @@ class Appr(Inc_Learning_Appr):
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
+                ####
+                adapted_features = distiller(features) if t > 0 else None
+                if t > 0:
+                    with torch.no_grad():
+                        adapted_protos = distiller(self.prototypes)
+                    dist = torch.cdist(adapted_features, adapted_protos)
+                    dist = torch.topk(dist, self.K, 1, largest=False)[0]
+                    dist = torch.sqrt(dist) / self.N
+                    loss += -dist.mean()
+                ####
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
