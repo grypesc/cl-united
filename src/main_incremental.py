@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import torch
@@ -285,8 +286,9 @@ def main(argv=None):
 
         # Test
         for u in range(t + 1):
-
-            _, train_acc_taw[t, u], train_acc_tag[t, u] = appr.eval(u, trn_loader[u])
+            trn_loader_copy = copy.deepcopy(trn_loader[u])
+            trn_loader_copy.dataset.transform = val_loader[0].dataset.transform
+            _, train_acc_taw[t, u], train_acc_tag[t, u] = appr.eval(u, trn_loader_copy)
             if u < t:
                 train_forg_taw[t, u] = train_acc_taw[:t, u].max(0) - train_acc_taw[t, u]
                 train_forg_tag[t, u] = train_acc_tag[:t, u].max(0) - train_acc_tag[t, u]
