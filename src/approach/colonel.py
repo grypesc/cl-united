@@ -23,7 +23,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=11, S=64, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=True, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=True, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -31,6 +31,7 @@ class Appr(Inc_Learning_Appr):
         self.N = N
         self.K = K
         self.S = S
+        self.beta = beta
         self.adapt = adapt
         self.alpha = alpha
         self.smoothing = smoothing
@@ -70,6 +71,10 @@ class Appr(Inc_Learning_Appr):
                             help='latent space size',
                             type=int,
                             default=64)
+        parser.add_argument('--beta',
+                            help='latent space size',
+                            type=int,
+                            default=100)
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
@@ -179,7 +184,14 @@ class Appr(Inc_Learning_Appr):
                 loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                adapted_features = distiller(features) if t > 0 else None
+                if t > 0:
+                    adapted_protos = distiller(self.prototypes)
+                    dist = torch.cdist(features, adapted_protos)
+                    dist = torch.topk(dist, 3, 1, largest=False)[0]
+                    dist = torch.sqrt(dist) / self.beta
+                    loss += -dist.mean()
+                total_loss, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
@@ -200,7 +212,8 @@ class Appr(Inc_Learning_Appr):
                     logits = head(features)
                     loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
                     old_features = self.old_model(images) if t > 0 else None
-                    _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                    adapted_features = distiller(features) if t > 0 else None
+                    _, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
                     val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
@@ -320,10 +333,10 @@ class Appr(Inc_Learning_Appr):
 
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
-    def distill_knowledge(self, loss, features, distiller, old_features=None):
+    def distill_knowledge(self, loss, adapted_features, old_features=None):
         if old_features is None:
             return loss, 0
-        kd_loss = nn.functional.mse_loss(distiller(features), old_features)
+        kd_loss = nn.functional.mse_loss(adapted_features, old_features)
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
