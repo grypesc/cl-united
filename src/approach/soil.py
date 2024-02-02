@@ -119,9 +119,6 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        if t > 0 and self.adapt:
-            print("### Adapting prototypes ###")
-            self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
@@ -172,13 +169,6 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 ####
-                adapted_features = distiller(features) if t > 0 else None
-                if t > 0:
-                    dist = torch.cdist(adapted_features, self.prototypes)
-                    dist = torch.topk(dist, self.K, 1, largest=False)[0]
-                    dist = torch.sqrt(dist) / self.N
-                    loss += -dist.mean()
-                ####
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
@@ -224,32 +214,33 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         transforms = val_loader.dataset.transform
         model = self.model
-        new_protos = torch.zeros((num_classes_in_t, self.S), device=self.device)
-        for c in range(num_classes_in_t):
-            train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
-            if isinstance(trn_loader.dataset.images, list):
-                train_images = list(compress(trn_loader.dataset.images, train_indices))
-                ds = ClassDirectoryDataset(train_images, transforms)
-            else:
-                ds = trn_loader.dataset.images[train_indices]
-                ds = ClassMemoryDataset(ds, transforms)
-            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
-            from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
-            for images in loader:
-                bsz = images.shape[0]
-                images = images.to(self.device, non_blocking=True)
-                features = model(images)
-                class_features[from_: from_+bsz] = features
-                features = model(torch.flip(images, dims=(3,)))
-                class_features[from_+bsz: from_+2*bsz] = features
-                from_ += 2*bsz
+        new_protos = torch.zeros((sum(self.classes_in_tasks), self.S), device=self.device)
+        for t, (trn_loader, val_loader) in enumerate(zip(self.train_data_loaders, self.val_data_loaders)):
+            for c in range(self.classes_in_tasks[t]):
+                train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
+                if isinstance(trn_loader.dataset.images, list):
+                    train_images = list(compress(trn_loader.dataset.images, train_indices))
+                    ds = ClassDirectoryDataset(train_images, transforms)
+                else:
+                    ds = trn_loader.dataset.images[train_indices]
+                    ds = ClassMemoryDataset(ds, transforms)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+                from_ = 0
+                class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+                for images in loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device, non_blocking=True)
+                    features = model(images)
+                    class_features[from_: from_+bsz] = features
+                    features = model(torch.flip(images, dims=(3,)))
+                    class_features[from_+bsz: from_+2*bsz] = features
+                    from_ += 2*bsz
 
             # Calculate centroid
-            centroid = class_features.mean(dim=0)
-            new_protos[c] = centroid
+                centroid = class_features.mean(dim=0)
+                new_protos[c + self.task_offset[t]] = centroid
 
-        self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
+        self.prototypes = new_protos
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
