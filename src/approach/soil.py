@@ -61,7 +61,7 @@ class Appr(Inc_Learning_Appr):
         parser = ArgumentParser()
         parser.add_argument('--N',
                             help='Number of learners',
-                            type=int,
+                            type=float,
                             default=100)
         parser.add_argument('--K',
                             help='number of learners sampled for task',
