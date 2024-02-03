@@ -9,14 +9,12 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
-from .criterions.abc import ABCLoss
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_nca import ProxyNCA
 from .criterions.ce import CE
 
-torch.backends.cuda.matmul.allow_tf32 = False
 
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
@@ -47,8 +45,7 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"proxy-nca": ProxyNCA,
-                          "ce" : CE,
-                          "abc": ABCLoss}[criterion]
+                          "ce" : CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -118,6 +115,9 @@ class Appr(Inc_Learning_Appr):
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
+        if t > 0 and self.adapt:
+            print("### Adapting prototypes ###")
+            self.adapt_prototypes(t, trn_loader, val_loader)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
@@ -163,12 +163,12 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 5:
+                if epoch < 10 and t > 0:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                ####
+
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
@@ -214,33 +214,32 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         transforms = val_loader.dataset.transform
         model = self.model
-        new_protos = torch.zeros((sum(self.classes_in_tasks), self.S), device=self.device)
-        for t, (trn_loader, val_loader) in enumerate(zip(self.train_data_loaders, self.val_data_loaders)):
-            for c in range(self.classes_in_tasks[t]):
-                train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
-                if isinstance(trn_loader.dataset.images, list):
-                    train_images = list(compress(trn_loader.dataset.images, train_indices))
-                    ds = ClassDirectoryDataset(train_images, transforms)
-                else:
-                    ds = trn_loader.dataset.images[train_indices]
-                    ds = ClassMemoryDataset(ds, transforms)
-                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
-                from_ = 0
-                class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
-                for images in loader:
-                    bsz = images.shape[0]
-                    images = images.to(self.device, non_blocking=True)
-                    features = model(images)
-                    class_features[from_: from_+bsz] = features
-                    features = model(torch.flip(images, dims=(3,)))
-                    class_features[from_+bsz: from_+2*bsz] = features
-                    from_ += 2*bsz
+        new_protos = torch.zeros((num_classes_in_t, self.S), device=self.device)
+        for c in range(num_classes_in_t):
+            train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
+            if isinstance(trn_loader.dataset.images, list):
+                train_images = list(compress(trn_loader.dataset.images, train_indices))
+                ds = ClassDirectoryDataset(train_images, transforms)
+            else:
+                ds = trn_loader.dataset.images[train_indices]
+                ds = ClassMemoryDataset(ds, transforms)
+            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+            from_ = 0
+            class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+            for images in loader:
+                bsz = images.shape[0]
+                images = images.to(self.device, non_blocking=True)
+                features = model(images)
+                class_features[from_: from_+bsz] = features
+                features = model(torch.flip(images, dims=(3,)))
+                class_features[from_+bsz: from_+2*bsz] = features
+                from_ += 2*bsz
 
             # Calculate centroid
-                centroid = class_features.mean(dim=0)
-                new_protos[c + self.task_offset[t]] = centroid
+            centroid = class_features.mean(dim=0)
+            new_protos[c] = centroid
 
-        self.prototypes = new_protos
+        self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
@@ -357,7 +356,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
