@@ -17,7 +17,7 @@ from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_nca import ProxyNCA
 from .criterions.ce import CE
 
-class BabelDataset(torch.utils.data.Dataset):
+class BabelMemoryDataset(torch.utils.data.Dataset):
     """ Dataset consisting of samples of only one class """
     def __init__(self, images, targets, transforms):
         self.images = images
@@ -74,7 +74,7 @@ class Appr(Inc_Learning_Appr):
         parser = ArgumentParser()
         parser.add_argument('--N',
                             help='Number of learners',
-                            type=float,
+                            type=int,
                             default=5)
         parser.add_argument('--K',
                             help='number of learners sampled for task',
@@ -130,7 +130,11 @@ class Appr(Inc_Learning_Appr):
         self.old_model.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
-        self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
+        if t > 0:
+            self.train_incremental(t, trn_loader, val_loader, num_classes_in_t)
+        else:
+            self.train_initial(t, trn_loader, val_loader, num_classes_in_t)
+
         if t > 0 and self.adapt:
             print("### Adapting prototypes ###")
             self.adapt_prototypes(t, trn_loader, val_loader)
@@ -145,7 +149,8 @@ class Appr(Inc_Learning_Appr):
         print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
         print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
 
-    def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
+
+    def train_initial(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
@@ -212,6 +217,106 @@ class Appr(Inc_Learning_Appr):
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
+
+            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+            valid_loss = sum(valid_loss) / len(val_loader.dataset)
+            valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
+
+            train_acc = train_hits / len(trn_loader.dataset)
+            val_acc = val_hits / len(val_loader.dataset)
+
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
+
+    def train_incremental(self, t, trn_loader, val_loader, num_classes_in_t):
+        print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
+        print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
+        distiller = nn.Linear(self.S, self.S)
+        if self.distiller_type == "mlp":
+            distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+                                      nn.GELU(),
+                                      nn.Linear(2 * self.S, self.S)
+                                      )
+        # Freeze batch norms
+        for m in self.model.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.eval()
+                m.weight.requires_grad = False
+                m.bias.requires_grad = False
+
+        # Prepare expert loaders
+        all_classes = np.unique(trn_loader.dataset.labels)
+        classes = random.sample(list(all_classes), len(all_classes) // self.N)
+        is_in = np.isin(trn_loader.dataset.labels, classes)
+        images = trn_loader.dataset.images[is_in]
+        targets = np.array(trn_loader.dataset.labels)[is_in]
+        for i, c in enumerate(classes):
+            targets[targets == c] = i
+        ds = BabelMemoryDataset(images, targets, transforms=trn_loader.dataset.transform)
+        expert_train_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+
+        is_in = np.isin(val_loader.dataset.labels, classes)
+        images = val_loader.dataset.images[is_in]
+        targets = np.array(val_loader.dataset.labels)[is_in]
+        for i, c in enumerate(classes):
+            targets[targets == c] = i
+        ds = BabelMemoryDataset(images, targets, transforms=val_loader.dataset.transform)
+        expert_val_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+
+
+        distiller.to(self.device, non_blocking=True)
+        criterion = self.criterion(len(classes), self.S, self.device)
+        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+
+        for epoch in range(self.nepochs):
+            train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
+            train_hits, val_hits = 0, 0
+            self.model.train()
+            criterion.train()
+            distiller.train()
+            train_iterator = iter(trn_loader)
+            for expert_images, expert_targets in expert_train_loader:
+                expert_images, expert_targets = expert_images.to(self.device, non_blocking=True), expert_targets.to(self.device, non_blocking=True)
+                images, targets = next(train_iterator)
+                images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                optimizer.zero_grad()
+                expert_features = self.model(expert_images)
+                features = self.model(images)
+                if epoch < 5:
+                    features = features.detach()
+                    expert_features = expert_features.detach()
+                loss, logits = criterion(expert_features, expert_targets)
+                with torch.no_grad():
+                    old_features = self.old_model(images)
+                total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
+                optimizer.step()
+                train_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
+                train_loss.append(float(expert_images.shape[0] * loss))
+                train_kd_loss.append(float(images.shape[0] * kd_loss))
+            lr_scheduler.step()
+
+            self.model.eval()
+            criterion.eval()
+            distiller.eval()
+            with torch.no_grad():
+                val_iterator = iter(trn_loader)
+                for expert_images, expert_targets in expert_val_loader:
+                    expert_images, expert_targets = expert_images.to(self.device, non_blocking=True), expert_targets.to(self.device, non_blocking=True)
+                    images, targets = next(val_iterator)
+                    images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                    expert_features = self.model(expert_images)
+                    features = self.model(images)
+                    loss, logits = criterion(expert_features, expert_targets)
+                    old_features = self.old_model(images)
+
+                    _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                    val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
+                    valid_loss.append(float(expert_images.shape[0] * loss))
+                    valid_kd_loss.append(float(images.shape[0] * kd_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
