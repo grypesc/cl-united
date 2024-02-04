@@ -14,7 +14,6 @@ from torchmetrics import Accuracy
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
-from .criterions.proxy_nca import ProxyNCA
 from .criterions.ce import CE
 
 class BabelMemoryDataset(torch.utils.data.Dataset):
@@ -306,8 +305,8 @@ class Appr(Inc_Learning_Appr):
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
 
-            train_acc = train_hits / len(trn_loader.dataset)
-            val_acc = val_hits / len(val_loader.dataset)
+            train_acc = train_hits / len(expert_train_loader.dataset)
+            val_acc = val_hits / len(expert_val_loader.dataset)
 
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
