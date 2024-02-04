@@ -232,16 +232,16 @@ class Appr(Inc_Learning_Appr):
         all_classes = np.unique(trn_loader.dataset.labels)
         classes = random.sample(list(all_classes), len(all_classes) // self.N)
         is_in = np.isin(trn_loader.dataset.labels, classes)
-        images = trn_loader.dataset.images[is_in]
-        targets = np.array(trn_loader.dataset.labels)[is_in]
+        images = copy.deepcopy(trn_loader.dataset.images[is_in])
+        targets = copy.deepcopy(np.array(trn_loader.dataset.labels)[is_in])
         for i, c in enumerate(classes):
             targets[targets == c] = i
         ds = BabelMemoryDataset(images, targets, transforms=trn_loader.dataset.transform)
         expert_train_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
 
         is_in = np.isin(val_loader.dataset.labels, classes)
-        images = val_loader.dataset.images[is_in]
-        targets = np.array(val_loader.dataset.labels)[is_in]
+        images = copy.deepcopy(val_loader.dataset.images[is_in])
+        targets = copy.deepcopy(np.array(val_loader.dataset.labels)[is_in])
         for i, c in enumerate(classes):
             targets[targets == c] = i
         ds = BabelMemoryDataset(images, targets, transforms=val_loader.dataset.transform)
@@ -456,7 +456,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
