@@ -37,7 +37,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=5, K=3, S=64, distiller="linear", criterion="ce", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -60,8 +60,7 @@ class Appr(Inc_Learning_Appr):
         self.prototypes = torch.empty((0, self.S), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.criterion = {"proxy-nca": ProxyNCA,
-                          "ce" : CE}[criterion]
+        self.criterion = {"ce" : CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -109,8 +108,8 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca", "abc"],
-                            default="proxy-nca")
+                            choices=["ce"],
+                            default="ce")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -159,13 +158,6 @@ class Appr(Inc_Learning_Appr):
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
-        # Freeze batch norms
-        if t > 0:
-            for m in self.model.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.eval()
-                    m.weight.requires_grad = False
-                    m.bias.requires_grad = False
 
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
@@ -187,17 +179,12 @@ class Appr(Inc_Learning_Appr):
                 if epoch < 10 and t > 0:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
-                with torch.no_grad():
-                    old_features = self.old_model(images) if t > 0 else None
-
-                total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
-                total_loss.backward()
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
-                train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
             self.model.eval()
@@ -210,13 +197,9 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
-                    old_features = self.old_model(images) if t>0 else None
-
-                    _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
-                    valid_kd_loss.append(float(bsz * kd_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
@@ -279,8 +262,8 @@ class Appr(Inc_Learning_Appr):
             train_iterator = iter(trn_loader)
             for expert_images, expert_targets in expert_train_loader:
                 expert_images, expert_targets = expert_images.to(self.device, non_blocking=True), expert_targets.to(self.device, non_blocking=True)
-                images, targets = next(train_iterator)
-                images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                images, _ = next(train_iterator)
+                images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 expert_features = self.model(expert_images)
                 features = self.model(images)
@@ -303,11 +286,11 @@ class Appr(Inc_Learning_Appr):
             criterion.eval()
             distiller.eval()
             with torch.no_grad():
-                val_iterator = iter(trn_loader)
+                val_iterator = iter(val_loader)
                 for expert_images, expert_targets in expert_val_loader:
                     expert_images, expert_targets = expert_images.to(self.device, non_blocking=True), expert_targets.to(self.device, non_blocking=True)
-                    images, targets = next(val_iterator)
-                    images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                    images, _ = next(val_iterator)
+                    images = images.to(self.device, non_blocking=True)
                     expert_features = self.model(expert_images)
                     features = self.model(images)
                     loss, logits = criterion(expert_features, expert_targets)
@@ -461,8 +444,6 @@ class Appr(Inc_Learning_Appr):
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
     def distill_knowledge(self, loss, features, distiller, old_features=None):
-        if old_features is None:
-            return loss, 0
         kd_loss = nn.functional.mse_loss(distiller(features), old_features)
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
