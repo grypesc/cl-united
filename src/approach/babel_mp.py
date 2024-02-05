@@ -38,7 +38,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=5, K=3, S=64, distiller="linear", criterion="ce", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=5, num_processes=1, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -46,7 +46,9 @@ class Appr(Inc_Learning_Appr):
         self.N = N
         self.K = K
         self.S = S
-        self.adapt = adapt
+        self.num_processes = num_processes
+        if self.N % num_processes != 0:
+            raise RuntimeError("N must be divisible by num processes")
         self.alpha = alpha
         self.smoothing = smoothing
         self.patience = patience
@@ -57,17 +59,16 @@ class Appr(Inc_Learning_Appr):
                       "resnet14": resnet14(num_features=S, activation_function=activation_function),
                       "resnet20": resnet20(num_features=S, activation_function=activation_function),
                       "resnet32": resnet32(num_features=S, activation_function=activation_function)}
-        self.models = []
+        self.models = torch.nn.ModuleList()
         for _ in range(self.N):
             model = model_dict[nnet]
             model.fc = nn.Identity()
             model.to(device, non_blocking=True)
             self.models.append(model)
         self.train_data_loaders, self.val_data_loaders = [], []
-        self.prototypes = [torch.empty((0, self.S), device=self.device) for _ in range(self.N)]
+        self.prototypes = torch.empty((self.N, 0, self.S), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.criterion = {"ce" : CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -98,10 +99,6 @@ class Appr(Inc_Learning_Appr):
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
                             default=0.95)
-        parser.add_argument('--adapt',
-                            help='Adapt prototypes',
-                            action='store_true',
-                            default=True)
         parser.add_argument('--activation-function',
                             help='Activation functions in resnet',
                             type=str,
@@ -112,11 +109,10 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["linear", "mlp"],
                             default="mlp")
-        parser.add_argument('--criterion',
-                            help='Loss function',
-                            type=str,
-                            choices=["ce"],
-                            default="ce")
+        parser.add_argument('--num-processes',
+                            help='Number of processes',
+                            type=int,
+                            default=1)
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -133,22 +129,29 @@ class Appr(Inc_Learning_Appr):
         self.classes_in_tasks.append(num_classes_in_t)
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
-
-        with mp.Pool(self.N) as pool:
-            multiple_results = [pool.apply_async(take_care, args=(copy.deepcopy(self.models[i]), copy.deepcopy(self.prototypes[i]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.device))
-                                for i in range(self.N)]
-            results = [res.get() for res in multiple_results]
+        results = []
+        for i in range(self.N // self.num_processes):
+            print(f"Spawned {self.num_processes} processes")
+            offset = self.num_processes * i
+            with mp.Pool(self.num_processes) as pool:
+                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]), copy.deepcopy(self.prototypes[offset + j]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.alpha, self.device))
+                                    for j in range(self.num_processes)]
+                results.extend([res.get() for res in multiple_results])
+            print(f"Joined {self.num_processes} processes")
+        new_protos = []
         for i, (model, protos) in enumerate(results):
             self.models[i] = model
-            self.prototypes[i] = protos
+            new_protos.append(protos)
+        self.prototypes = torch.stack(new_protos)
+        torch.save(self.models, self.logger.exp_path + f"/models/model_{t}.pth")
+        torch.save(self.prototypes, self.logger.exp_path + f"/models/proto_{t}.pt")
 
     @torch.no_grad()
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
         for m in self.models:
             m.eval()
-        protos = torch.stack(self.prototypes, dim=2)
-        tag_acc = Accuracy("multiclass", num_classes=self.prototypes[0].shape[0])
+        tag_acc = Accuracy("multiclass", num_classes=self.prototypes.shape[1])
         taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
         offset = self.task_offset[t]
         for images, target in val_loader:
@@ -156,7 +159,7 @@ class Appr(Inc_Learning_Appr):
             features = [m(images) for m in self.models]
             dist = []
             for i in range(self.N):
-                d = torch.cdist(features[i], protos[:, :, i])
+                d = torch.cdist(features[i], self.prototypes[i, :, :])
                 dist.append(d)
             dist = torch.stack(dist, dim=2)
             dist = torch.mean(dist, dim=2)
@@ -169,23 +172,23 @@ class Appr(Inc_Learning_Appr):
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
 
-def take_care(model, prototypes, K, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, device):
+def train_child(model, prototypes, K, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, device):
     old_model = copy.deepcopy(model)
     old_model.eval()
     if t == 0:
         model = train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
     else:
-        model = train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
+        model = train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
     if t > 0:
-        print("### Adapting prototypes ###")
+        print(f"{os.getpid()}: ### Adapting prototypes ###")
         prototypes = adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, nepochs, device)
     prototypes = create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_in_t, task_offset, device)
     return copy.deepcopy(model), copy.deepcopy(prototypes)
 
 
 def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device):
-    print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-    print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
+    print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+    print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
 
     distiller.to(device, non_blocking=True)
@@ -236,13 +239,13 @@ def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepoch
         train_acc = train_hits / len(trn_loader.dataset)
         val_acc = val_hits / len(val_loader.dataset)
 
-        print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+        print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
     return model
 
-def train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device):
-    print(f'The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-    print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
+def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device):
+    print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+    print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
 
     # Freeze batch norms
@@ -261,7 +264,7 @@ def train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classe
     for i, c in enumerate(classes):
         targets[targets == c] = i
     ds = BabelMemoryDataset(images, targets, transforms=trn_loader.dataset.transform)
-    expert_train_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+    expert_train_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=0, shuffle=True)
 
     is_in = np.isin(val_loader.dataset.labels, classes)
     images = copy.deepcopy(val_loader.dataset.images[is_in])
@@ -269,7 +272,7 @@ def train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classe
     for i, c in enumerate(classes):
         targets[targets == c] = i
     ds = BabelMemoryDataset(images, targets, transforms=val_loader.dataset.transform)
-    expert_val_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True)
+    expert_val_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=0, shuffle=True)
 
 
     distiller.to(device, non_blocking=True)
@@ -297,7 +300,7 @@ def train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classe
             loss, logits = criterion(expert_features, expert_targets)
             with torch.no_grad():
                 old_features = old_model(images)
-            total_loss, kd_loss = distill_knowledge(loss, features, distiller, old_features)
+            total_loss, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(parameters, 1)
             optimizer.step()
@@ -320,7 +323,7 @@ def train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classe
                 loss, logits = criterion(expert_features, expert_targets)
                 old_features = old_model(images)
 
-                _, kd_loss = distill_knowledge(loss, features, distiller, old_features)
+                _, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
                 val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
                 valid_loss.append(float(expert_images.shape[0] * loss))
                 valid_kd_loss.append(float(images.shape[0] * kd_loss))
@@ -333,14 +336,14 @@ def train_incremental(model, old_model, K, t, trn_loader, val_loader, num_classe
         train_acc = train_hits / len(expert_train_loader.dataset)
         val_acc = val_hits / len(expert_val_loader.dataset)
 
-        print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+        print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
     return model
 
 @torch.no_grad()
 def create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_in_t, task_offset, device):
     """ Create distributions for task t"""
-    print(f"Creating prototypes in {os.getpid()}")
+    print(f"{os.getpid()}: Creating prototypes")
     model.eval()
     transforms = val_loader.dataset.transform
     new_protos = torch.zeros((num_classes_in_t, 64), device=device)
@@ -352,7 +355,7 @@ def create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_
         else:
             ds = trn_loader.dataset.images[train_indices]
             ds = ClassMemoryDataset(ds, transforms)
-        loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+        loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=0, shuffle=False)
         from_ = 0
         class_features = torch.full((2 * len(ds), 64), fill_value=-999999999.0, device=device)
         for images in loader:
@@ -408,7 +411,7 @@ def adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, ne
 
         train_loss = sum(train_loss) / len(trn_loader.dataset)
         valid_loss = sum(valid_loss) / len(val_loader.dataset)
-        print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
+        print(f"{os.getpid()}: Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
 
     # Calculate new prototypes
     with torch.no_grad():
