@@ -142,10 +142,6 @@ class Appr(Inc_Learning_Appr):
             self.models[i] = model
             self.prototypes[i] = protos
 
-
-        for num, model in enumerate(self.models):
-            take_care(model, self.prototypes[num], self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.device)
-
     @torch.no_grad()
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
