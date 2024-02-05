@@ -38,7 +38,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=5, num_processes=1, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=5, num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -52,6 +52,7 @@ class Appr(Inc_Learning_Appr):
         self.alpha = alpha
         self.smoothing = smoothing
         self.patience = patience
+        self.use_negative_class = use_negative
         self.old_model = None
         self.model = None
         mp.set_start_method('spawn')
@@ -104,6 +105,10 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["identity", "relu", "lrelu"],
                             default="relu")
+        parser.add_argument('--use-negative',
+                            help='Adapt prototypes',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--distiller',
                             help='Distiller',
                             type=str,
@@ -130,11 +135,12 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
         results = []
+        # train_child(copy.deepcopy(self.models[0]), copy.deepcopy(self.prototypes[0]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.alpha, self.use_negative_class, self.device)
         for i in range(self.N // self.num_processes):
             print(f"Spawned {self.num_processes} processes")
             offset = self.num_processes * i
             with mp.Pool(self.num_processes) as pool:
-                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]), copy.deepcopy(self.prototypes[offset + j]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.alpha, self.device))
+                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]), copy.deepcopy(self.prototypes[offset + j]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.alpha, self.use_negative_class, self.device))
                                     for j in range(self.num_processes)]
                 results.extend([res.get() for res in multiple_results])
             print(f"Joined {self.num_processes} processes")
@@ -172,13 +178,16 @@ class Appr(Inc_Learning_Appr):
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
 
-def train_child(model, prototypes, K, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, device):
+def train_child(model, prototypes, K, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, use_negative_class, device):
     old_model = copy.deepcopy(model)
     old_model.eval()
     if t == 0:
         model = train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
+    elif use_negative_class:
+        model = train_incremental_neg(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
     else:
         model = train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
+
     if t > 0:
         print(f"{os.getpid()}: ### Adapting prototypes ###")
         prototypes = adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, nepochs, device)
@@ -194,7 +203,7 @@ def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepoch
     distiller.to(device, non_blocking=True)
     criterion = CE(num_classes_in_t, 64, device)
     parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, wd, 0.1)
+    optimizer, lr_scheduler = get_optimizer(parameters, wd, 0.1, nepochs)
 
     for epoch in range(nepochs):
         train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -243,6 +252,28 @@ def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepoch
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
     return model
 
+def prepare_expert_loader(loader, classes, use_negative_class):
+    if use_negative_class:
+        images = copy.deepcopy(loader.dataset.images)
+        targets = copy.deepcopy(np.array(loader.dataset.labels))
+        labels = np.unique(targets)
+        for c in labels:
+            if c not in classes:
+                targets[targets == c] = -1
+        for i, c in enumerate(classes):
+            targets[targets == c] = i
+        targets[targets == -1] = i+1
+    else:
+        is_in = np.isin(loader.dataset.labels, classes)
+        images = copy.deepcopy(loader.dataset.images[is_in])
+        targets = copy.deepcopy(np.array(loader.dataset.labels)[is_in])
+        for i, c in enumerate(classes):
+            targets[targets == c] = i
+
+    ds = BabelMemoryDataset(images, targets, transforms=loader.dataset.transform)
+    return torch.utils.data.DataLoader(ds, batch_size=loader.batch_size, num_workers=0, shuffle=True)
+
+
 def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device):
     print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
     print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
@@ -258,27 +289,14 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
     # Prepare expert loaders
     all_classes = np.unique(trn_loader.dataset.labels)
     classes = random.sample(list(all_classes), K)
-    is_in = np.isin(trn_loader.dataset.labels, classes)
-    images = copy.deepcopy(trn_loader.dataset.images[is_in])
-    targets = copy.deepcopy(np.array(trn_loader.dataset.labels)[is_in])
-    for i, c in enumerate(classes):
-        targets[targets == c] = i
-    ds = BabelMemoryDataset(images, targets, transforms=trn_loader.dataset.transform)
-    expert_train_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=0, shuffle=True)
 
-    is_in = np.isin(val_loader.dataset.labels, classes)
-    images = copy.deepcopy(val_loader.dataset.images[is_in])
-    targets = copy.deepcopy(np.array(val_loader.dataset.labels)[is_in])
-    for i, c in enumerate(classes):
-        targets[targets == c] = i
-    ds = BabelMemoryDataset(images, targets, transforms=val_loader.dataset.transform)
-    expert_val_loader = torch.utils.data.DataLoader(ds, batch_size=trn_loader.batch_size, num_workers=0, shuffle=True)
-
+    expert_train_loader = prepare_expert_loader(trn_loader, classes, False)
+    expert_val_loader = prepare_expert_loader(val_loader, classes, False)
 
     distiller.to(device, non_blocking=True)
     criterion = CE(len(classes), 64, device)
     parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.1)
+    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.1, nepochs)
 
     for epoch in range(nepochs):
         train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -340,6 +358,82 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
     return model
 
+
+def train_incremental_neg(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device):
+    print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+    print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
+    distiller = nn.Linear(64, 64)
+
+    # Freeze batch norms
+    for m in model.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.eval()
+            m.weight.requires_grad = False
+            m.bias.requires_grad = False
+
+    # Prepare expert loaders
+    all_classes = np.unique(trn_loader.dataset.labels)
+    classes = random.sample(list(all_classes), K)
+
+    expert_train_loader = prepare_expert_loader(trn_loader, classes, True)
+    expert_val_loader = prepare_expert_loader(val_loader, classes, True)
+
+    distiller.to(device, non_blocking=True)
+    criterion = CE(len(classes)+1, 64, device)
+    parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
+    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.1, nepochs)
+
+    for epoch in range(nepochs):
+        train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
+        train_hits, val_hits = 0, 0
+        model.train()
+        criterion.train()
+        distiller.train()
+        for expert_images, expert_targets in expert_train_loader:
+            expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
+            optimizer.zero_grad()
+            expert_features = model(expert_images)
+            if epoch < 10:
+                expert_features = expert_features.detach()
+            loss, logits = criterion(expert_features, expert_targets)
+            with torch.no_grad():
+                old_features = old_model(expert_images)
+            total_loss, kd_loss = distill_knowledge(loss, expert_features, distiller, old_features, alpha)
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(parameters, 1)
+            optimizer.step()
+            train_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
+            train_loss.append(float(expert_images.shape[0] * loss))
+            train_kd_loss.append(float(expert_images.shape[0] * kd_loss))
+        lr_scheduler.step()
+
+        model.eval()
+        criterion.eval()
+        distiller.eval()
+        with torch.no_grad():
+            for expert_images, expert_targets in expert_val_loader:
+                expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
+                expert_features = model(expert_images)
+                loss, logits = criterion(expert_features, expert_targets)
+                old_features = old_model(expert_images)
+
+                _, kd_loss = distill_knowledge(loss, expert_features, distiller, old_features, alpha)
+                val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
+                valid_loss.append(float(expert_images.shape[0] * loss))
+                valid_kd_loss.append(float(expert_images.shape[0] * kd_loss))
+
+        train_loss = sum(train_loss) / len(expert_train_loader.dataset)
+        train_kd_loss = sum(train_kd_loss) / len(expert_train_loader.dataset)
+        valid_loss = sum(valid_loss) / len(expert_val_loader.dataset)
+        valid_kd_loss = sum(valid_kd_loss) / len(expert_val_loader.dataset)
+
+        train_acc = train_hits / len(expert_train_loader.dataset)
+        val_acc = val_hits / len(expert_val_loader.dataset)
+
+        print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+              f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
+    return model
+
 @torch.no_grad()
 def create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_in_t, task_offset, device):
     """ Create distributions for task t"""
@@ -379,7 +473,7 @@ def adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, ne
     adapter = nn.Linear(64, 64)
 
     adapter.to(device, non_blocking=True)
-    optimizer, lr_scheduler = get_adapter_optimizer(adapter.parameters())
+    optimizer, lr_scheduler = get_adapter_optimizer(adapter.parameters(), nepochs)
     for epoch in range(nepochs):
         adapter.train()
         train_loss, valid_loss = [], []
@@ -424,14 +518,16 @@ def distill_knowledge(loss, features, distiller, old_features=None, alpha=0.5):
     total_loss = (1 - alpha) * loss + alpha * kd_loss
     return total_loss, kd_loss
 
-def get_optimizer(parameters, wd, lr, milestones=(40, 80)):
+def get_optimizer(parameters, wd, lr, epochs):
     """Returns the optimizer"""
+    milestones = (int(epochs*0.4), int(epochs*0.8))
     optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
     return optimizer, scheduler
 
-def get_adapter_optimizer(parameters, milestones=(40, 80)):
+def get_adapter_optimizer(parameters, epochs):
     """Returns the optimizer"""
+    milestones = (int(epochs*0.6), int(epochs*0.8))
     optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
     return optimizer, scheduler
