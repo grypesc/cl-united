@@ -194,7 +194,7 @@ def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepoch
     distiller.to(device, non_blocking=True)
     criterion = CE(num_classes_in_t, 64, device)
     parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, wd, 0.01)
+    optimizer, lr_scheduler = get_optimizer(parameters, wd, 0.1)
 
     for epoch in range(nepochs):
         train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -278,7 +278,7 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
     distiller.to(device, non_blocking=True)
     criterion = CE(len(classes), 64, device)
     parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.01)
+    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.1)
 
     for epoch in range(nepochs):
         train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
