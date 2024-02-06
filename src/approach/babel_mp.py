@@ -38,7 +38,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=5, num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=5, strategy="constant", num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -53,6 +53,7 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.patience = patience
         self.use_negative_class = use_negative
+        self.alpha_strategy = strategy
         self.old_model = None
         self.model = None
         mp.set_start_method('spawn')
@@ -113,7 +114,12 @@ class Appr(Inc_Learning_Appr):
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="mlp")
+                            default="linear")
+        parser.add_argument('--strategy',
+                            help='alpha strategy',
+                            type=str,
+                            choices=["constant", "random", "linspace"],
+                            default="constant")
         parser.add_argument('--num-processes',
                             help='Number of processes',
                             type=int,
@@ -134,13 +140,18 @@ class Appr(Inc_Learning_Appr):
         self.classes_in_tasks.append(num_classes_in_t)
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
+        alphas = np.full((self.N,), self.alpha)
+        if self.alpha_strategy == "linspace":
+            alphas = np.linspace(0.1, 1, self.N)
+        elif self.alpha_strategy == "random":
+            alphas = np.rand(self.N)
         results = []
         # train_child(copy.deepcopy(self.models[0]), copy.deepcopy(self.prototypes[0]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.alpha, self.use_negative_class, self.device)
         for i in range(self.N // self.num_processes):
             print(f"Spawned {self.num_processes} processes")
             offset = self.num_processes * i
             with mp.Pool(self.num_processes) as pool:
-                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]), copy.deepcopy(self.prototypes[offset + j]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, self.alpha, self.use_negative_class, self.device))
+                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]), copy.deepcopy(self.prototypes[offset + j]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, alphas[offset + j], self.use_negative_class, self.device))
                                     for j in range(self.num_processes)]
                 results.extend([res.get() for res in multiple_results])
             print(f"Joined {self.num_processes} processes")
