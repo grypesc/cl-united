@@ -140,6 +140,14 @@ class Appr(Inc_Learning_Appr):
         self.classes_in_tasks.append(num_classes_in_t)
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
+
+        # if t<9:
+        #     return
+        #
+        # self.models = torch.load('../model_9.pth')
+        # self.prototypes = torch.load('../proto_9.pt')
+        # return
+
         alphas = np.full((self.N,), self.alpha)
         if self.alpha_strategy == "linspace":
             alphas = np.linspace(0.1, 1, self.N)
@@ -300,6 +308,7 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
     # Prepare expert loaders
     all_classes = np.unique(trn_loader.dataset.labels)
     classes = random.sample(list(all_classes), K)
+    print(classes)
 
     expert_train_loader = prepare_expert_loader(trn_loader, classes, False)
     expert_val_loader = prepare_expert_loader(val_loader, classes, False)
@@ -385,7 +394,7 @@ def train_incremental_neg(model, old_model, K, trn_loader, val_loader, nepochs, 
     # Prepare expert loaders
     all_classes = np.unique(trn_loader.dataset.labels)
     classes = random.sample(list(all_classes), K)
-
+    print(classes)
     expert_train_loader = prepare_expert_loader(trn_loader, classes, True)
     expert_val_loader = prepare_expert_loader(val_loader, classes, True)
 
@@ -524,7 +533,7 @@ def adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, ne
         prototypes = adapter(prototypes)
     return prototypes
 
-def distill_knowledge(loss, features, distiller, old_features=None, alpha=0.5):
+def distill_knowledge(loss, features, distiller, old_features, alpha=0.5):
     kd_loss = nn.functional.mse_loss(distiller(features), old_features)
     total_loss = (1 - alpha) * loss + alpha * kd_loss
     return total_loss, kd_loss
