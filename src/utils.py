@@ -11,6 +11,8 @@ def seed_everything(seed=0):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def print_summary(acc_taw, acc_tag, forg_taw, forg_tag):
