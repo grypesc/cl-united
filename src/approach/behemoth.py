@@ -47,8 +47,7 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"proxy-nca": ProxyNCA,
-                          "ce" : CE,
-                          "abc": ABCLoss}[criterion]
+                          "ce" : CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -159,7 +158,7 @@ class Appr(Inc_Learning_Appr):
         distiller.to(self.device, non_blocking=True)
         criterion = CE(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), epochs=self.nepochs)
         adapter_loss, push_loss = 0, 0
 
         for epoch in range(self.nepochs):
@@ -250,17 +249,18 @@ class Appr(Inc_Learning_Appr):
     def adapt_protos_from_distiller(self, distiller):
         W = copy.deepcopy(distiller.weight.data.detach())
         b = copy.deepcopy(distiller.bias.data.detach())
-        is_ok = False
-        while not is_ok:
-            try:
-                adapted_protos = torch.linalg.solve(W.unsqueeze(0).repeat(self.prototypes.shape[0], 1, 1), self.prototypes - b.unsqueeze(0)).detach()
-            except RuntimeError:
-                self.eps = 10 * self.eps
-                W += torch.eye(self.S) * self.eps
-                print(f"WARNING: Distiller matrix is singular. Increasing eps to: {self.eps:.7f} but this may hurt results")
-            else:
-                is_ok = True
-        self.eps = 1e-8
+        # is_ok = False
+        # while not is_ok:
+        #     try:
+        #         adapted_protos = torch.linalg.solve(W.unsqueeze(0).repeat(self.prototypes.shape[0], 1, 1), self.prototypes - b.unsqueeze(0)).detach()
+        #     except RuntimeError:
+        #         self.eps = 10 * self.eps
+        #         W += torch.eye(self.S) * self.eps
+        #         print(f"WARNING: Distiller matrix is singular. Increasing eps to: {self.eps:.7f} but this may hurt results")
+        #     else:
+        #         is_ok = True
+        # self.eps = 1e-8
+        adapted_protos = torch.linalg.solve(W.unsqueeze(0).repeat(self.prototypes.shape[0], 1, 1), self.prototypes - b.unsqueeze(0)).detach()
         return adapted_protos
 
     @torch.no_grad()
@@ -307,7 +307,7 @@ class Appr(Inc_Learning_Appr):
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_prototypes = copy.deepcopy(self.prototypes)
-        for epoch in range(self.nepochs):
+        for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
             for images, _ in trn_loader:
@@ -401,8 +401,9 @@ class Appr(Inc_Learning_Appr):
         total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-    def get_optimizer(self, parameters, wd, milestones=(40, 80)):
+    def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
+        milestones = (int(0.4*epochs), int(0.8*epochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=self.momentum)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
