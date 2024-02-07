@@ -183,7 +183,7 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = distiller(features) if t > 0 else None
                 adapted_old_features = adapter(old_features) if t > 0 else None
                 if t > 0:
-                    adapter_loss = nn.functional.mse_loss(adapted_old_features, features.detach())
+                    adapter_loss = self.alpha * nn.functional.mse_loss(adapted_old_features, features.detach())
                     loss += adapter_loss
                     dist = torch.cdist(features, adapter(self.prototypes))
                     dist = torch.topk(dist, self.K, 1, largest=False)[0]
@@ -266,7 +266,7 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
             from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
