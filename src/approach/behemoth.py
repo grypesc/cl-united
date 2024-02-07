@@ -74,7 +74,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=0.5)
+                            default=1)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -156,7 +156,7 @@ class Appr(Inc_Learning_Appr):
                     m.bias.requires_grad = False
 
         distiller.to(self.device, non_blocking=True)
-        criterion = self.criterion(num_classes_in_t, self.S, self.device)
+        criterion = CE(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(adapter.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
         adapter_loss, push_loss = 0, 0
@@ -183,10 +183,10 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = distiller(features) if t > 0 else None
                 adapted_old_features = adapter(old_features) if t > 0 else None
                 if t > 0:
-                    adapter_loss = nn.functional.mse_loss(adapted_old_features, features)
-                    loss+= adapter_loss
+                    adapter_loss = nn.functional.mse_loss(adapted_old_features, features.detach())
+                    loss += adapter_loss
                     dist = torch.cdist(features, adapter(self.prototypes))
-                    dist = torch.topk(dist, 1, 1, largest=False)[0]
+                    dist = torch.topk(dist, self.K, 1, largest=False)[0]
                     dist = torch.sqrt(dist) / self.N
                     push_loss = -dist.mean()
                     loss += push_loss
@@ -221,7 +221,7 @@ class Appr(Inc_Learning_Appr):
                         adapter_loss = nn.functional.mse_loss(adapted_old_features, features)
                         loss += adapter_loss
                         dist = torch.cdist(features, adapter(self.prototypes))
-                        dist = torch.topk(dist, 1, 1, largest=False)[0]
+                        dist = torch.topk(dist, self.K, 1, largest=False)[0]
                         dist = torch.sqrt(dist) / self.N
                         push_loss = -dist.mean()
                         loss += push_loss
@@ -384,7 +384,7 @@ class Appr(Inc_Learning_Appr):
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(adapted_features, old_features)
-        total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
+        total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
     def get_optimizer(self, parameters, wd, milestones=(40, 80)):
