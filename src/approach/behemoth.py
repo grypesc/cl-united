@@ -9,7 +9,6 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
-from .criterions.abc import ABCLoss
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
@@ -22,8 +21,8 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
-                 momentum=0.9, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=100, K=1, S=64, distiller="linear", criterion="ce", alpha=1, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 momentum=0.9, gamma=1.0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 logger=None, push_fun="sqrt", N=100, K=1, S=64, distiller="linear", criterion="ce", alpha=1, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -33,6 +32,7 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.adapt = adapt
         self.alpha = alpha
+        self.gamma = gamma
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
@@ -52,7 +52,8 @@ class Appr(Inc_Learning_Appr):
         self.svals_explained_by = []
         self.distiller_type = distiller
         self.eps = 1e-8
-
+        self.push_fun = {"sqrt": torch.sqrt,
+                          "sigmoid" : torch.sigmoid}[push_fun]
 
 
     @staticmethod
@@ -66,6 +67,10 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
+                            default=1)
+        parser.add_argument('--gamma',
+                            help='number of learners sampled for task',
+                            type=float,
                             default=1)
         parser.add_argument('--S',
                             help='latent space size',
@@ -96,8 +101,13 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca", "abc"],
+                            choices=["ce", "proxy-nca"],
                             default="ce")
+        parser.add_argument('--push-fun',
+                            help='xxx',
+                            type=str,
+                            choices=["sqrt", "sigmoid"],
+                            default="sqrt")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -185,8 +195,8 @@ class Appr(Inc_Learning_Appr):
                 if t > 0:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
                     dist = torch.cdist(features, adapted_protos)
-                    dist = torch.topk(dist, self.K, 1, largest=False)[0]
-                    dist = torch.sqrt(dist) / self.N
+                    dist = torch.topk(dist, self.K, 1, largest=False)[0] * self.gamma
+                    dist = self.push_fun(dist) / self.N
                     push_loss = -dist.mean()
 
                 total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
@@ -217,8 +227,8 @@ class Appr(Inc_Learning_Appr):
                     if t > 0:
                         adapted_protos = self.adapt_protos_from_distiller(distiller)
                         dist = torch.cdist(features, adapted_protos)
-                        dist = torch.topk(dist, self.K, 1, largest=False)[0]
-                        dist = torch.sqrt(dist) / self.N
+                        dist = torch.topk(dist, self.K, 1, largest=False)[0] * self.gamma
+                        dist = self.push_fun(dist) / self.N
                         push_loss = -dist.mean()
 
                     total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
