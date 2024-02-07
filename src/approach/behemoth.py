@@ -97,7 +97,7 @@ class Appr(Inc_Learning_Appr):
                             help='Loss function',
                             type=str,
                             choices=["ce", "proxy-nca", "abc"],
-                            default="proxy-nca")
+                            default="ce")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -136,13 +136,12 @@ class Appr(Inc_Learning_Appr):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
+        adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
-        adapter = nn.Linear(self.S, self.S)
-        if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
@@ -160,9 +159,11 @@ class Appr(Inc_Learning_Appr):
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(adapter.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+        adapter_loss, push_loss = 0, 0
 
         for epoch in range(self.nepochs):
-            train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
+            train_loss, train_kd_loss, train_adapter_loss, train_push_loss = [], [], [], []
+            valid_loss, valid_kd_loss, valid_adapter_loss, valid_push_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
             criterion.train()
@@ -180,13 +181,15 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
-                adapted_adapted_features = adapter(adapted_features) if t > 0 else None
+                adapted_old_features = adapter(old_features) if t > 0 else None
                 if t > 0:
-                    loss += nn.functional.mse_loss(adapted_adapted_features, features)
+                    adapter_loss = nn.functional.mse_loss(adapted_old_features, features)
+                    loss+= adapter_loss
                     dist = torch.cdist(features, adapter(self.prototypes))
-                    dist = torch.topk(dist, 3, 1, largest=False)[0]
+                    dist = torch.topk(dist, 1, 1, largest=False)[0]
                     dist = torch.sqrt(dist) / self.N
-                    loss += -dist.mean()
+                    push_loss = -dist.mean()
+                    loss += push_loss
 
                 total_loss, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
                 total_loss.backward()
@@ -196,6 +199,8 @@ class Appr(Inc_Learning_Appr):
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
                 train_kd_loss.append(float(bsz * kd_loss))
+                train_adapter_loss.append(float(bsz * adapter_loss))
+                train_push_loss.append(float(bsz * push_loss))
             lr_scheduler.step()
 
             self.model.eval()
@@ -209,24 +214,40 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
-                    old_features = self.old_model(images) if t>0 else None
+                    old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
+                    adapted_old_features = adapter(old_features) if t > 0 else None
+                    if t > 0:
+                        adapter_loss = nn.functional.mse_loss(adapted_old_features, features)
+                        loss += adapter_loss
+                        dist = torch.cdist(features, adapter(self.prototypes))
+                        dist = torch.topk(dist, 1, 1, largest=False)[0]
+                        dist = torch.sqrt(dist) / self.N
+                        push_loss = -dist.mean()
+                        loss += push_loss
+
                     _, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
+                    valid_adapter_loss.append(float(bsz * adapter_loss))
+                    valid_push_loss.append(float(bsz * push_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+            train_adapter_loss = sum(train_adapter_loss) / len(trn_loader.dataset)
+            train_push_loss = sum(train_push_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
+            valid_adapter_loss = sum(valid_adapter_loss) / len(val_loader.dataset)
+            valid_push_loss = sum(valid_push_loss) / len(val_loader.dataset)
 
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} AD: {train_adapter_loss:.3f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} AD: {valid_adapter_loss:.3f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -363,8 +384,6 @@ class Appr(Inc_Learning_Appr):
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(adapted_features, old_features)
-        if self.criterion.__name__ == "ABCLoss":
-            kd_loss *= 1000
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
