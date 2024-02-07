@@ -52,6 +52,7 @@ class Appr(Inc_Learning_Appr):
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
+        self.eps = 1e-8
 
 
 
@@ -157,11 +158,12 @@ class Appr(Inc_Learning_Appr):
 
         distiller.to(self.device, non_blocking=True)
         criterion = CE(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
-        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(adapter.parameters())
+        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
         adapter_loss, push_loss = 0, 0
 
         for epoch in range(self.nepochs):
+            self.eps = 1e-8
             train_loss, train_kd_loss, train_adapter_loss, train_push_loss = [], [], [], []
             valid_loss, valid_kd_loss, valid_adapter_loss, valid_push_loss = [], [], [], []
             train_hits, val_hits = 0, 0
@@ -181,11 +183,9 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
-                adapted_old_features = adapter(old_features) if t > 0 else None
                 if t > 0:
-                    adapter_loss = self.alpha * nn.functional.mse_loss(adapted_old_features, features.detach())
-                    loss += adapter_loss
-                    dist = torch.cdist(features, adapter(self.prototypes))
+                    adapted_protos = self.adapt_protos_from_distiller(distiller)
+                    dist = torch.cdist(features, adapted_protos)
                     dist = torch.topk(dist, self.K, 1, largest=False)[0]
                     dist = torch.sqrt(dist) / self.N
                     push_loss = -dist.mean()
@@ -216,11 +216,9 @@ class Appr(Inc_Learning_Appr):
                     loss, logits = criterion(features, targets)
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
-                    adapted_old_features = adapter(old_features) if t > 0 else None
                     if t > 0:
-                        adapter_loss = nn.functional.mse_loss(adapted_old_features, features)
-                        loss += adapter_loss
-                        dist = torch.cdist(features, adapter(self.prototypes))
+                        adapted_protos = self.adapt_protos_from_distiller(distiller)
+                        dist = torch.cdist(features, adapted_protos)
                         dist = torch.topk(dist, self.K, 1, largest=False)[0]
                         dist = torch.sqrt(dist) / self.N
                         push_loss = -dist.mean()
@@ -245,9 +243,25 @@ class Appr(Inc_Learning_Appr):
 
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
-
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} AD: {train_adapter_loss:.3f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} AD: {valid_adapter_loss:.3f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
+
+    @torch.no_grad()
+    def adapt_protos_from_distiller(self, distiller):
+        W = copy.deepcopy(distiller.weight.data.detach())
+        b = copy.deepcopy(distiller.bias.data.detach())
+        is_ok = False
+        while not is_ok:
+            try:
+                adapted_protos = torch.linalg.solve(W.unsqueeze(0).repeat(self.prototypes.shape[0], 1, 1), self.prototypes - b.unsqueeze(0)).detach()
+            except RuntimeError:
+                self.eps = 10 * self.eps
+                W += torch.eye(self.S) * self.eps
+                print(f"WARNING: Distiller matrix is singular. Increasing eps to: {self.eps:.7f} but this may hurt results")
+            else:
+                is_ok = True
+        self.eps = 1e-8
+        return adapted_protos
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
