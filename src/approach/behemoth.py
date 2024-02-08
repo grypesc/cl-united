@@ -62,8 +62,8 @@ class Appr(Inc_Learning_Appr):
         parser = ArgumentParser()
         parser.add_argument('--N',
                             help='Number of learners',
-                            type=int,
-                            default=100)
+                            type=float,
+                            default=10)
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
@@ -71,7 +71,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--gamma',
                             help='number of learners sampled for task',
                             type=float,
-                            default=1)
+                            default=0.01)
         parser.add_argument('--S',
                             help='latent space size',
                             type=int,
@@ -250,8 +250,8 @@ class Appr(Inc_Learning_Appr):
 
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} CE: {train_ce_loss:.3f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} CE: {valid_ce_loss:.3f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} CE: {train_ce_loss:.2f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} CE: {valid_ce_loss:.2f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
 
     @torch.no_grad()
     def adapt_protos_from_distiller(self, distiller):
