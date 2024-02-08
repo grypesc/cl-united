@@ -13,9 +13,6 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_yolo import ProxyYolo
-from .criterions.ce import CE
-
-torch.backends.cuda.matmul.allow_tf32 = False
 
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
@@ -380,6 +377,9 @@ class Appr(Inc_Learning_Appr):
                 new_dist = torch.stack(new_dist)
                 print(f"Old {subset} distance: {old_dist.mean():.2f} ± {old_dist.std():.2f}")
                 print(f"New {subset} distance: {new_dist.mean():.2f} ± {new_dist.std():.2f}")
+
+            distances = np.array(torch.cdist(self.prototypes, self.prototypes).cpu())
+            np.savetxt(self.logger.exp_path + "/proto_dist.txt", distances)
 
     @torch.no_grad()
     def eval(self, t, val_loader):
