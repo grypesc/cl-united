@@ -12,7 +12,7 @@ from torchmetrics import Accuracy
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
-from .criterions.proxy_nca import ProxyNCA
+from .criterions.proxy_yolo import ProxyYolo
 from .criterions.ce import CE
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -46,8 +46,6 @@ class Appr(Inc_Learning_Appr):
         self.prototypes = torch.empty((0, self.S), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.criterion = {"proxy-nca": ProxyNCA,
-                          "ce" : CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -166,7 +164,7 @@ class Appr(Inc_Learning_Appr):
                     m.bias.requires_grad = False
 
         distiller.to(self.device, non_blocking=True)
-        criterion = CE(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
+        criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), epochs=self.nepochs)
         push_loss = 0
@@ -188,13 +186,13 @@ class Appr(Inc_Learning_Appr):
                 features = self.model(images)
                 if epoch < 10:
                     features = features.detach()
-                ce_loss, logits = criterion(features, targets)
+                ce_loss, logits, proxies = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
                 if t > 0:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
-                    dist = torch.cdist(features, adapted_protos)
+                    dist = torch.cdist(proxies, adapted_protos)
                     dist = torch.topk(dist, self.K, 1, largest=False)[0] * self.gamma
                     dist = self.push_fun(dist) / self.N
                     push_loss = -dist.mean()
@@ -221,12 +219,12 @@ class Appr(Inc_Learning_Appr):
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
-                    ce_loss, logits = criterion(features, targets)
+                    ce_loss, logits, proxies = criterion(features, targets)
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
                     if t > 0:
                         adapted_protos = self.adapt_protos_from_distiller(distiller)
-                        dist = torch.cdist(features, adapted_protos)
+                        dist = torch.cdist(proxies, adapted_protos)
                         dist = torch.topk(dist, self.K, 1, largest=False)[0] * self.gamma
                         dist = self.push_fun(dist) / self.N
                         push_loss = -dist.mean()
