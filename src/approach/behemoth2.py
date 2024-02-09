@@ -159,13 +159,14 @@ class Appr(Inc_Learning_Appr):
             valid_loss, valid_kd_loss, valid_ce_loss, valid_push_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
+            self.old_model.train()
             # Freeze batch norms
-            if t > 0:
-                for m in self.model.modules():
-                    if isinstance(m, nn.BatchNorm2d):
-                        m.eval()
-                        m.weight.requires_grad = False
-                        m.bias.requires_grad = False
+            # if t > 0:
+            #     for m in self.model.modules():
+            #         if isinstance(m, nn.BatchNorm2d):
+            #             m.eval()
+            #             m.weight.requires_grad = False
+            #             m.bias.requires_grad = False
             criterion.train()
             distiller.train()
 
@@ -201,6 +202,7 @@ class Appr(Inc_Learning_Appr):
             lr_scheduler.step()
 
             self.model.eval()
+            self.old_model.eval()
             criterion.eval()
             distiller.eval()
 
@@ -295,6 +297,7 @@ class Appr(Inc_Learning_Appr):
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
         self.model.eval()
+        self.old_model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
