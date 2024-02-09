@@ -62,7 +62,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
-                            default=1)
+                            default=3)
         parser.add_argument('--gamma',
                             help='number of learners sampled for task',
                             type=float,
@@ -74,7 +74,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=1)
+                            default=10)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -92,7 +92,7 @@ class Appr(Inc_Learning_Appr):
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="mlp")
+                            default="linear")
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
@@ -102,7 +102,7 @@ class Appr(Inc_Learning_Appr):
                             help='xxx',
                             type=str,
                             choices=["sqrt", "sigmoid"],
-                            default="sqrt")
+                            default="sigmoid")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -141,17 +141,12 @@ class Appr(Inc_Learning_Appr):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
-        adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
-            adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.GELU(),
-                                      nn.Linear(2 * self.S, self.S)
-                                      )
-        adapter.to(self.device)
+
         # Freeze batch norms
         if t > 0:
             for m in self.model.modules():
@@ -174,7 +169,7 @@ class Appr(Inc_Learning_Appr):
             self.model.train()
             criterion.train()
             distiller.train()
-            adapter.train()
+
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
@@ -190,7 +185,7 @@ class Appr(Inc_Learning_Appr):
                 if t > 0:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
                     dist = torch.cdist(proxies, adapted_protos)
-                    dist = torch.topk(dist, self.K, 1, largest=False)[0] * self.gamma
+                    dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
                     dist = self.push_fun(dist) / self.N
                     push_loss = -dist.mean()
 
@@ -209,7 +204,7 @@ class Appr(Inc_Learning_Appr):
             self.model.eval()
             criterion.eval()
             distiller.eval()
-            adapter.eval()
+
             with torch.no_grad():
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
@@ -222,7 +217,7 @@ class Appr(Inc_Learning_Appr):
                     if t > 0:
                         adapted_protos = self.adapt_protos_from_distiller(distiller)
                         dist = torch.cdist(proxies, adapted_protos)
-                        dist = torch.topk(dist, self.K, 1, largest=False)[0] * self.gamma
+                        dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
                         dist = self.push_fun(dist) / self.N
                         push_loss = -dist.mean()
 
