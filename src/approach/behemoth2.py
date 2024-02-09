@@ -147,14 +147,6 @@ class Appr(Inc_Learning_Appr):
                                       nn.Linear(2 * self.S, self.S)
                                       )
 
-        # Freeze batch norms
-        if t > 0:
-            for m in self.model.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.eval()
-                    m.weight.requires_grad = False
-                    m.bias.requires_grad = False
-
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
@@ -167,6 +159,13 @@ class Appr(Inc_Learning_Appr):
             valid_loss, valid_kd_loss, valid_ce_loss, valid_push_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
+            # Freeze batch norms
+            if t > 0:
+                for m in self.model.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.eval()
+                        m.weight.requires_grad = False
+                        m.bias.requires_grad = False
             criterion.train()
             distiller.train()
 
