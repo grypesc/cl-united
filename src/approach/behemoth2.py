@@ -48,7 +48,8 @@ class Appr(Inc_Learning_Appr):
         self.distiller_type = distiller
         self.eps = 1e-8
         self.push_fun = {"sqrt": torch.sqrt,
-                          "sigmoid" : torch.sigmoid}[push_fun]
+                          "sigmoid" : torch.sigmoid,
+                          "linear" : lambda x: x}[push_fun]
 
 
     @staticmethod
@@ -101,7 +102,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--push-fun',
                             help='xxx',
                             type=str,
-                            choices=["sqrt", "sigmoid"],
+                            choices=["sqrt", "sigmoid", "linear"],
                             default="sigmoid")
         parser.add_argument('--smoothing',
                             help='label smoothing',
