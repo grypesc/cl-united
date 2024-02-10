@@ -159,7 +159,7 @@ class Appr(Inc_Learning_Appr):
             valid_loss, valid_kd_loss, valid_ce_loss, valid_push_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
-            self.old_model.train()
+            self.old_model.eval()
             # Freeze batch norms
             # if t > 0:
             #     for m in self.model.modules():
