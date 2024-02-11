@@ -209,7 +209,7 @@ class Appr(Inc_Learning_Appr):
                     ce_loss, logits, proxies = criterion(features, targets)
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
-                    if t > 0:
+                    if t > 0 and epoch > 30:
                         adapted_protos = self.adapt_protos_from_distiller(distiller)
                         dist = torch.cdist(proxies, adapted_protos)
                         dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
