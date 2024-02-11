@@ -176,7 +176,7 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
-                if t > 0:
+                if t > 0 and epoch > 10:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
                     dist = torch.cdist(proxies, adapted_protos)
                     dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
@@ -185,8 +185,7 @@ class Appr(Inc_Learning_Appr):
 
                 total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
-                torch.nn.utils.clip_grad_norm_(distiller.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
