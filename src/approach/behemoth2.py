@@ -141,6 +141,7 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
+        self.old_model.eval()
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
@@ -160,14 +161,6 @@ class Appr(Inc_Learning_Appr):
             valid_loss, valid_kd_loss, valid_ce_loss, valid_push_loss = [], [], [], []
             train_hits, val_hits = 0, 0
             self.model.train()
-            self.old_model.eval()
-            # Freeze batch norms
-            # if t > 0:
-            #     for m in self.model.modules():
-            #         if isinstance(m, nn.BatchNorm2d):
-            #             m.eval()
-            #             m.weight.requires_grad = False
-            #             m.bias.requires_grad = False
             criterion.train()
             distiller.train()
 
@@ -192,7 +185,8 @@ class Appr(Inc_Learning_Appr):
 
                 total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(distiller.parameters(), self.clipgrad)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
