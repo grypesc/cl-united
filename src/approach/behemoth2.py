@@ -176,7 +176,7 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
-                if t > 0 and epoch > 30:
+                if t > 0 and epoch > 20:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
                     dist = torch.cdist(proxies, adapted_protos)
                     dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
@@ -238,6 +238,11 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} CE: {train_ce_loss:.2f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} CE: {valid_ce_loss:.2f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
 
+        # if t > 0:
+        #     distiller.eval()
+        #     with torch.no_grad():
+        #         self.prototypes = self.adapt_protos_from_distiller(distiller)
+
     @torch.no_grad()
     def adapt_protos_from_distiller(self, distiller):
         W = copy.deepcopy(distiller.weight.data.detach())
@@ -245,7 +250,7 @@ class Appr(Inc_Learning_Appr):
         # is_ok = False
         # while not is_ok:
         #     try:
-        #         adapted_protos = torch.linalg.solve(W.unsqueeze(0).repeat(self.prototypes.shape[0], 1, 1), self.prototypes - b.unsqueeze(0)).detach()
+        #         adapted_protos = torch.linalg.solve(W.T, self.prototypes - b.unsqueeze(0), left=False).detach()
         #     except RuntimeError:
         #         self.eps = 10 * self.eps
         #         W += torch.eye(self.S) * self.eps
@@ -253,7 +258,7 @@ class Appr(Inc_Learning_Appr):
         #     else:
         #         is_ok = True
         # self.eps = 1e-8
-        adapted_protos = torch.linalg.solve(W.unsqueeze(0).repeat(self.prototypes.shape[0], 1, 1), self.prototypes - b.unsqueeze(0)).detach()
+        adapted_protos = torch.linalg.solve(W.T, self.prototypes - b.unsqueeze(0), left=False)
         return adapted_protos
 
     @torch.no_grad()
