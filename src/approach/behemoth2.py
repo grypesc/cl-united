@@ -38,6 +38,7 @@ class Appr(Inc_Learning_Appr):
                       "resnet20": resnet20(num_features=S, activation_function=activation_function),
                       "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
         self.model.fc = nn.Identity()
+        self.latent_act = torch.nn.LeakyReLU()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.prototypes = torch.empty((0, self.S), device=self.device)
@@ -137,6 +138,7 @@ class Appr(Inc_Learning_Appr):
         norms = torch.norm(self.prototypes, dim=1)
         print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
         print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
+        # torch.save(self.model, "model.pth")
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
@@ -175,7 +177,7 @@ class Appr(Inc_Learning_Appr):
                 ce_loss, logits, proxies = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                adapted_features = distiller(features) if t > 0 else None
+                adapted_features = distiller(self.latent_act(features)) if t > 0 else None
                 if t > 0 and epoch > 20:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
                     dist = torch.cdist(proxies, adapted_protos)
@@ -208,7 +210,7 @@ class Appr(Inc_Learning_Appr):
                     features = self.model(images)
                     ce_loss, logits, proxies = criterion(features, targets)
                     old_features = self.old_model(images) if t > 0 else None
-                    adapted_features = distiller(features) if t > 0 else None
+                    adapted_features = distiller(self.latent_act(features)) if t > 0 else None
                     if t > 0 and epoch > 30:
                         adapted_protos = self.adapt_protos_from_distiller(distiller)
                         dist = torch.cdist(proxies, adapted_protos)
@@ -247,6 +249,8 @@ class Appr(Inc_Learning_Appr):
     def adapt_protos_from_distiller(self, distiller):
         W = copy.deepcopy(distiller.weight.data.detach())
         b = copy.deepcopy(distiller.bias.data.detach())
+        protos = copy.deepcopy(self.prototypes)
+        protos[protos < 0] *= 100
         # is_ok = False
         # while not is_ok:
         #     try:
