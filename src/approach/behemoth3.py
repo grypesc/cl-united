@@ -255,6 +255,7 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = distiller(features) if t > 0 else None
                 if t > 0 and epoch > 30:
                     adapted_protos = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, 0.01, self.adapter_epochs)
+                    self.model.train()
                     dist = torch.cdist(proxies, adapted_protos)
                     dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
                     dist = self.push_fun(dist) / self.N
