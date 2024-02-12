@@ -54,7 +54,7 @@ class Adapter(torch.nn.Module):
             lr_scheduler.step()
             self.nn.eval()
 
-            if epoch % 5 == 4:
+            if epoch % 3 == 2:
                 with torch.no_grad():
                     for images, _ in val_loader:
                         bsz = images.shape[0]
@@ -82,7 +82,7 @@ class Adapter(torch.nn.Module):
 
     def get_optimizer(self, parameters, epochs, lr):
         """Returns the optimizer"""
-        milestones = [int(epochs * 0.8)]
+        milestones = [2]
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
@@ -121,7 +121,7 @@ class Appr(Inc_Learning_Appr):
         self.svals_explained_by = []
         self.distiller_type = distiller
         self.eps = 1e-8
-        self.adapter_epochs = 5
+        self.adapter_epochs = 3
         self.push_fun = {"sqrt": torch.sqrt,
                           "sigmoid": torch.sigmoid,
                           "linear": lambda x: x}[push_fun]
@@ -200,9 +200,9 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        # if t > 0 and self.adapt:
-        #     print("### Adapting prototypes ###")
-        #     self.adapt_prototypes(t, trn_loader, val_loader)
+        if t > 0 and self.adapt:
+            print("### Adapting prototypes ###")
+            self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
