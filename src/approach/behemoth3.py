@@ -54,7 +54,7 @@ class Adapter(torch.nn.Module):
             lr_scheduler.step()
             self.nn.eval()
 
-            if epoch % 10 == 9:
+            if epoch % 5 == 4:
                 with torch.no_grad():
                     for images, _ in val_loader:
                         bsz = images.shape[0]
@@ -69,7 +69,7 @@ class Adapter(torch.nn.Module):
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
 
-            print(f"\tAdapter: {epoch} Train: {100 * train_loss:.2f} Val: {100 * valid_loss:.2f}")
+            print(f"\tAdapter: {epoch} Train: {train_loss:.3f} Val: {valid_loss:.3f}")
 
         return self.adapt_prototypes(prototypes)
 
@@ -121,7 +121,7 @@ class Appr(Inc_Learning_Appr):
         self.svals_explained_by = []
         self.distiller_type = distiller
         self.eps = 1e-8
-        self.adapter_epochs = 20
+        self.adapter_epochs = 5
         self.push_fun = {"sqrt": torch.sqrt,
                           "sigmoid": torch.sigmoid,
                           "linear": lambda x: x}[push_fun]
