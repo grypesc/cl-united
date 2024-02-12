@@ -249,8 +249,6 @@ class Appr(Inc_Learning_Appr):
     def adapt_protos_from_distiller(self, distiller):
         W = copy.deepcopy(distiller.weight.data.detach())
         b = copy.deepcopy(distiller.bias.data.detach())
-        protos = copy.deepcopy(self.prototypes)
-        protos[protos < 0] *= 100
         # is_ok = False
         # while not is_ok:
         #     try:
@@ -263,6 +261,7 @@ class Appr(Inc_Learning_Appr):
         #         is_ok = True
         # self.eps = 1e-8
         adapted_protos = torch.linalg.solve(W.T, self.prototypes - b.unsqueeze(0), left=False)
+        adapted_protos[adapted_protos < 100] *= 100
         return adapted_protos
 
     @torch.no_grad()
