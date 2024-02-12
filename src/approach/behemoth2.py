@@ -38,7 +38,6 @@ class Appr(Inc_Learning_Appr):
                       "resnet20": resnet20(num_features=S, activation_function=activation_function),
                       "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
         self.model.fc = nn.Identity()
-        self.latent_act = torch.nn.LeakyReLU()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.prototypes = torch.empty((0, self.S), device=self.device)
@@ -126,9 +125,9 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        if t > 0 and self.adapt:
-            print("### Adapting prototypes ###")
-            self.adapt_prototypes(t, trn_loader, val_loader)
+        # if t > 0 and self.adapt:
+        #     print("### Adapting prototypes ###")
+        #     self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
@@ -138,7 +137,6 @@ class Appr(Inc_Learning_Appr):
         norms = torch.norm(self.prototypes, dim=1)
         print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
         print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
-        # torch.save(self.model, "model.pth")
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
@@ -177,7 +175,7 @@ class Appr(Inc_Learning_Appr):
                 ce_loss, logits, proxies = criterion(features, targets)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                adapted_features = distiller(self.latent_act(features)) if t > 0 else None
+                adapted_features = distiller(features) if t > 0 else None
                 if t > 0 and epoch > 20:
                     adapted_protos = self.adapt_protos_from_distiller(distiller)
                     dist = torch.cdist(proxies, adapted_protos)
@@ -210,7 +208,7 @@ class Appr(Inc_Learning_Appr):
                     features = self.model(images)
                     ce_loss, logits, proxies = criterion(features, targets)
                     old_features = self.old_model(images) if t > 0 else None
-                    adapted_features = distiller(self.latent_act(features)) if t > 0 else None
+                    adapted_features = distiller(features) if t > 0 else None
                     if t > 0 and epoch > 30:
                         adapted_protos = self.adapt_protos_from_distiller(distiller)
                         dist = torch.cdist(proxies, adapted_protos)
@@ -240,10 +238,10 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} CE: {train_ce_loss:.2f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} CE: {valid_ce_loss:.2f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
 
-        # if t > 0:
-        #     distiller.eval()
-        #     with torch.no_grad():
-        #         self.prototypes = self.adapt_protos_from_distiller(distiller)
+        if t > 0:
+            distiller.eval()
+            with torch.no_grad():
+                self.prototypes = self.adapt_protos_from_distiller(distiller)
 
     @torch.no_grad()
     def adapt_protos_from_distiller(self, distiller):
@@ -261,7 +259,6 @@ class Appr(Inc_Learning_Appr):
         #         is_ok = True
         # self.eps = 1e-8
         adapted_protos = torch.linalg.solve(W.T, self.prototypes - b.unsqueeze(0), left=False)
-        adapted_protos[adapted_protos < 100] *= 100
         return adapted_protos
 
     @torch.no_grad()
