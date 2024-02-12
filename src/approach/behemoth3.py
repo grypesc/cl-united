@@ -200,9 +200,9 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        # if t > 0 and self.adapt:
-        #     print("### Adapting prototypes ###")
-        #     self.adapt_prototypes(t, trn_loader, val_loader)
+        if t > 0 and self.adapt:
+            print("### Adapting prototypes ###")
+            self.adapt_prototypes(t, trn_loader, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
@@ -316,9 +316,9 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} CE: {train_ce_loss:.2f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} CE: {valid_ce_loss:.2f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
 
-        if t > 0:
-            with torch.no_grad():
-                self.prototypes = adapter.adapt_prototypes(self.prototypes)
+        # if t > 0:
+        #     with torch.no_grad():
+        #         self.prototypes = adapter.adapt_prototypes(self.prototypes)
 
 
     @torch.no_grad()
