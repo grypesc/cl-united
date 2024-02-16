@@ -138,13 +138,6 @@ class Appr(Inc_Learning_Appr):
                                       nn.GELU(),
                                       nn.Linear(2 * self.S, self.S)
                                       )
-        # Freeze batch norms
-        if t > 0:
-            for m in self.model.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.eval()
-                    m.weight.requires_grad = False
-                    m.bias.requires_grad = False
 
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
@@ -348,15 +341,16 @@ class Appr(Inc_Learning_Appr):
         total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-    def get_optimizer(self, parameters, wd, milestones=(40, 80)):
+    def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
+        milestones = (int(0.4*self.nepochs), int(0.8*self.nepochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
     def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
