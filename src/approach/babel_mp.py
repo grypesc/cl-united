@@ -216,7 +216,7 @@ def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_
     old_model = copy.deepcopy(model)
     old_model.eval()
     if use_negative_class:
-        model = train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader, nepochs, alpha, device)
+        model = train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loader, nepochs, wd, alpha, device)
     elif t == 0:
         model = train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
     else:
@@ -387,7 +387,7 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
     return model
 
 
-def train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader, nepochs, alpha, device):
+def train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loader, nepochs, wd, alpha, device):
     print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
     print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
@@ -406,7 +406,7 @@ def train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader
     distiller.to(device, non_blocking=True)
     criterion = CE(len(classes)+1, 64, device)
     parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.1, nepochs)
+    optimizer, lr_scheduler = get_optimizer(parameters, wd if t == 0 else 0, 0.1, nepochs)
 
     for epoch in range(nepochs):
         train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -422,7 +422,7 @@ def train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader
                 expert_features = expert_features.detach()
             loss, logits = criterion(expert_features, expert_targets)
             with torch.no_grad():
-                old_features = old_model(expert_images)
+                old_features = old_model(expert_images) if t > 0 else None
             total_loss, kd_loss = distill_knowledge(loss, expert_features, distiller, old_features, alpha)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(parameters, 1)
@@ -440,7 +440,7 @@ def train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader
                 expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
                 expert_features = model(expert_images)
                 loss, logits = criterion(expert_features, expert_targets)
-                old_features = old_model(expert_images)
+                old_features = old_model(expert_images) if t > 0 else None
 
                 _, kd_loss = distill_knowledge(loss, expert_features, distiller, old_features, alpha)
                 val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
@@ -458,6 +458,7 @@ def train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader
         print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
     return model
+
 
 @torch.no_grad()
 def create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_in_t, task_offset, device):
@@ -541,6 +542,8 @@ def adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, ne
 
 
 def distill_knowledge(loss, features, distiller, old_features, alpha):
+    if old_features is None:
+        return loss, 0
     kd_loss = nn.functional.mse_loss(distiller(features), old_features)
     total_loss = loss + alpha * kd_loss
     return total_loss, kd_loss
