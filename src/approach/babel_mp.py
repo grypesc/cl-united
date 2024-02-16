@@ -150,7 +150,7 @@ class Appr(Inc_Learning_Appr):
 
         alphas = np.full((self.N,), self.alpha)
         if self.alpha_strategy == "linspace":
-            alphas = np.linspace(0.1, 1, self.N)
+            alphas = np.linspace(0.0, 1, self.N)
         elif self.alpha_strategy == "random":
             alphas = np.rand(self.N)
         results = []
@@ -159,7 +159,20 @@ class Appr(Inc_Learning_Appr):
             print(f"Spawned {self.num_processes} processes")
             offset = self.num_processes * i
             with mp.Pool(self.num_processes) as pool:
-                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]), copy.deepcopy(self.prototypes[offset + j]), self.K, trn_loader, val_loader, t, num_classes_in_t, self.wd, self.nepochs, self.task_offset, alphas[offset + j], self.use_negative_class, self.device))
+                multiple_results = [pool.apply_async(train_child, args=(copy.deepcopy(self.models[offset + j]),
+                                                                        copy.deepcopy(self.prototypes[offset + j]),
+                                                                        self.K,
+                                                                        offset + j,
+                                                                        trn_loader,
+                                                                        val_loader,
+                                                                        t,
+                                                                        num_classes_in_t,
+                                                                        self.wd,
+                                                                        self.nepochs,
+                                                                        self.task_offset,
+                                                                        alphas[offset + j],
+                                                                        self.use_negative_class,
+                                                                        self.device))
                                     for j in range(self.num_processes)]
                 results.extend([res.get() for res in multiple_results])
             print(f"Joined {self.num_processes} processes")
@@ -185,6 +198,8 @@ class Appr(Inc_Learning_Appr):
             dist = []
             for i in range(self.N):
                 d = torch.cdist(features[i], self.prototypes[i, :, :])
+                # d = d - torch.mean(d, dim=1).unsqueeze(1)
+                # d = d / torch.std(d, dim=1).unsqueeze(1)
                 dist.append(d)
             dist = torch.stack(dist, dim=2)
             dist = torch.mean(dist, dim=2)
@@ -197,13 +212,13 @@ class Appr(Inc_Learning_Appr):
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
 
-def train_child(model, prototypes, K, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, use_negative_class, device):
+def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, use_negative_class, device):
     old_model = copy.deepcopy(model)
     old_model.eval()
-    if t == 0:
+    if use_negative_class:
+        model = train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader, nepochs, alpha, device)
+    elif t == 0:
         model = train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
-    elif use_negative_class:
-        model = train_incremental_neg(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
     else:
         model = train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
 
@@ -298,13 +313,6 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
     print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
 
-    # Freeze batch norms
-    for m in model.modules():
-        if isinstance(m, nn.BatchNorm2d):
-            m.eval()
-            m.weight.requires_grad = False
-            m.bias.requires_grad = False
-
     # Prepare expert loaders
     all_classes = np.unique(trn_loader.dataset.labels)
     classes = random.sample(list(all_classes), K)
@@ -379,22 +387,19 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
     return model
 
 
-def train_incremental_neg(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device):
+def train_incremental_neg(model, old_model, K, expert_id, trn_loader, val_loader, nepochs, alpha, device):
     print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
     print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
 
-    # Freeze batch norms
-    for m in model.modules():
-        if isinstance(m, nn.BatchNorm2d):
-            m.eval()
-            m.weight.requires_grad = False
-            m.bias.requires_grad = False
-
     # Prepare expert loaders
     all_classes = np.unique(trn_loader.dataset.labels)
-    classes = random.sample(list(all_classes), K)
-    print(classes)
+    if K == 1:
+        classes = [all_classes[expert_id]]
+    else:
+        classes = random.sample(list(all_classes), K)
+    print(f'{os.getpid()}: Training on classes: {classes}')
+
     expert_train_loader = prepare_expert_loader(trn_loader, classes, True)
     expert_val_loader = prepare_expert_loader(val_loader, classes, True)
 
@@ -488,6 +493,7 @@ def create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_
     prototypes = torch.cat((prototypes, new_protos), dim=0)
     return prototypes
 
+
 def adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, nepochs, device):
     model.eval()
     adapter = nn.Linear(64, 64)
@@ -533,10 +539,12 @@ def adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, ne
         prototypes = adapter(prototypes)
     return prototypes
 
-def distill_knowledge(loss, features, distiller, old_features, alpha=0.5):
+
+def distill_knowledge(loss, features, distiller, old_features, alpha):
     kd_loss = nn.functional.mse_loss(distiller(features), old_features)
-    total_loss = (1 - alpha) * loss + alpha * kd_loss
+    total_loss = loss + alpha * kd_loss
     return total_loss, kd_loss
+
 
 def get_optimizer(parameters, wd, lr, epochs):
     """Returns the optimizer"""
@@ -545,9 +553,10 @@ def get_optimizer(parameters, wd, lr, epochs):
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
     return optimizer, scheduler
 
+
 def get_adapter_optimizer(parameters, epochs):
     """Returns the optimizer"""
-    milestones = (int(epochs*0.6), int(epochs*0.8))
+    milestones = (int(epochs*0.4), int(epochs*0.8))
     optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
     return optimizer, scheduler
