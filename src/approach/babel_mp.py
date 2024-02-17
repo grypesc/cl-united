@@ -38,7 +38,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=5, strategy="constant", num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=5, strategy="constant", num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=10, smoothing=0., activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -71,8 +71,6 @@ class Appr(Inc_Learning_Appr):
         self.prototypes = torch.empty((self.N, 0, self.S), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.sval_fraction = sval_fraction
-        self.svals_explained_by = []
         self.distiller_type = distiller
 
 
@@ -96,11 +94,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=0.5)
-        parser.add_argument('--sval-fraction',
-                            help='Fraction of eigenvalues sum that is explained',
-                            type=float,
-                            default=0.95)
+                            default=10)
         parser.add_argument('--activation-function',
                             help='Activation functions in resnet',
                             type=str,
@@ -224,7 +218,7 @@ def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_
 
     if t > 0:
         print(f"{os.getpid()}: ### Adapting prototypes ###")
-        prototypes = adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, nepochs, device)
+        prototypes = adapt_prototypes(model, prototypes, old_model, t, trn_loader, val_loader, nepochs // 2, device)
     prototypes = create_prototypes(model, prototypes, t, trn_loader, val_loader, num_classes_in_t, task_offset, device)
     return copy.deepcopy(model), copy.deepcopy(prototypes)
 
@@ -418,7 +412,7 @@ def train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loa
             expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
             optimizer.zero_grad()
             expert_features = model(expert_images)
-            if epoch < 10:
+            if epoch < 10 and t > 0:
                 expert_features = expert_features.detach()
             loss, logits = criterion(expert_features, expert_targets)
             with torch.no_grad():
