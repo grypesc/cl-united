@@ -215,7 +215,7 @@ class Appr(Inc_Learning_Appr):
             valid_nca_loss = sum(valid_nca_loss) / len(val_loader.dataset)
             valid_push_loss = sum(valid_push_loss) / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} NCA: {train_nca_loss:.2f} Push: {train_push_loss:.2f}"
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} NCA: {train_nca_loss:.2f} Push: {train_push_loss:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} NCA: {valid_nca_loss:.2f} Push: {valid_push_loss:.2f}")
 
         # if t > 0:
