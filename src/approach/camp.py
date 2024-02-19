@@ -293,7 +293,12 @@ class Appr(Inc_Learning_Appr):
 
                 for c in range(old_prototypes.shape[0]):
                     train_indices = torch.tensor(labels) == c
-                    ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
+
+                    if isinstance(trn_loader.dataset.images, list):
+                        train_images = list(compress(trn_loader.dataset.images, train_indices))
+                        ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
+                    else:
+                        ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
                     loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
                     from_ = 0
                     class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
@@ -359,7 +364,12 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         self.svals_explained_by.append([])
         for i, _ in enumerate(self.train_data_loaders):
-            ds = ClassMemoryDataset(self.train_data_loaders[i].dataset.images, val_loader.dataset.transform)
+            if isinstance(self.train_data_loaders[i].dataset.images, list):
+                train_images = self.train_data_loaders[i].dataset.images
+                ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
+            else:
+                ds = ClassMemoryDataset(self.train_data_loaders[i].dataset.images, val_loader.dataset.transform)
+
             loader = torch.utils.data.DataLoader(ds, batch_size=256, num_workers=val_loader.num_workers, shuffle=False)
             from_ = 0
             class_features = torch.full((len(ds), self.S), fill_value=-999999999.0, device=self.device)
