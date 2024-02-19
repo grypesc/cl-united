@@ -6,30 +6,32 @@ import numpy as np
 from argparse import ArgumentParser
 from itertools import compress
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .incremental_learning import Inc_Learning_Appr
-from .criterions.proxy_yolo import ProxyYolo
+from .criterions.proxy_yolo import ProxyYolo, binarize_and_smooth_labels
+
 
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0.9, gamma=1.0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, push_fun="sqrt", N=100, K=1, S=64, distiller="linear", criterion="ce", alpha=1, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, beta=1, tau=1, S=64, distiller="linear", alpha=10, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
 
-        self.N = N
-        self.K = K
         self.S = S
         self.adapt = adapt
         self.alpha = alpha
+        self.beta = beta
         self.gamma = gamma
+        self.tau = tau
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
@@ -47,23 +49,20 @@ class Appr(Inc_Learning_Appr):
         self.svals_explained_by = []
         self.distiller_type = distiller
         self.eps = 1e-8
-        self.push_fun = {"sqrt": torch.sqrt,
-                          "sigmoid" : torch.sigmoid,
-                          "linear" : lambda x: x}[push_fun]
 
 
     @staticmethod
     def extra_parser(args):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
-        parser.add_argument('--N',
+        parser.add_argument('--beta',
                             help='Number of learners',
                             type=float,
-                            default=10)
-        parser.add_argument('--K',
-                            help='number of learners sampled for task',
-                            type=int,
-                            default=3)
+                            default=1)
+        parser.add_argument('--tau',
+                            help='xxx',
+                            type=float,
+                            default=1)
         parser.add_argument('--gamma',
                             help='number of learners sampled for task',
                             type=float,
@@ -94,16 +93,6 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["linear", "mlp"],
                             default="linear")
-        parser.add_argument('--criterion',
-                            help='Loss function',
-                            type=str,
-                            choices=["ce", "proxy-nca"],
-                            default="ce")
-        parser.add_argument('--push-fun',
-                            help='xxx',
-                            type=str,
-                            choices=["sqrt", "sigmoid", "linear"],
-                            default="sigmoid")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -151,93 +140,83 @@ class Appr(Inc_Learning_Appr):
                                       )
 
         distiller.to(self.device, non_blocking=True)
-        criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
+        criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=0)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), epochs=self.nepochs)
         push_loss = 0
 
         for epoch in range(self.nepochs):
-            self.eps = 1e-8
-            train_loss, train_kd_loss, train_ce_loss, train_push_loss = [], [], [], []
-            valid_loss, valid_kd_loss, valid_ce_loss, valid_push_loss = [], [], [], []
-            train_hits, val_hits = 0, 0
+            train_loss, train_kd_loss, train_nca_loss, train_push_loss = [], [], [], []
+            valid_loss, valid_kd_loss, valid_nca_loss, valid_push_loss = [], [], [], []
+
             self.model.train()
             criterion.train()
             distiller.train()
 
             for images, targets in trn_loader:
-                targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 10:
+                if epoch < 10 and t > 0:
                     features = features.detach()
-                ce_loss, logits, proxies = criterion(features, targets)
+                nca_loss, _, proxies = criterion(features, targets - self.task_offset[t])
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
                 if t > 0 and epoch > 20:
                     adapted_proxies = distiller(proxies)
-                    dist = torch.cdist(adapted_proxies, self.prototypes)
-                    dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
-                    dist = self.push_fun(dist) / self.N
-                    push_loss = -dist.mean()
+                    all_proxies = torch.cat((self.prototypes, adapted_proxies))
+                    T = binarize_and_smooth_labels(targets, len(all_proxies), self.smoothing)
+                    D = torch.cdist(old_features, all_proxies) ** 2
+                    push_loss = torch.sum(-T * F.log_softmax(-D * self.tau, -1), -1).mean() * self.beta
 
-                total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
+                total_loss, kd_loss = self.distill_knowledge(nca_loss + push_loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
-                if logits is not None:
-                    train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * total_loss))
                 train_kd_loss.append(float(bsz * kd_loss))
-                train_ce_loss.append(float(bsz * ce_loss))
+                train_nca_loss.append(float(bsz * nca_loss))
                 train_push_loss.append(float(bsz * push_loss))
             lr_scheduler.step()
 
             self.model.eval()
-            self.old_model.eval()
             criterion.eval()
             distiller.eval()
 
             with torch.no_grad():
                 for images, targets in val_loader:
-                    targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
-                    ce_loss, logits, proxies = criterion(features, targets)
+                    nca_loss, _, proxies = criterion(features, targets - self.task_offset[t])
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
                     if t > 0 and epoch > 20:
                         adapted_proxies = distiller(proxies)
-                        dist = torch.cdist(adapted_proxies, self.prototypes)
-                        dist = torch.topk(dist ** 2, self.K, 1, largest=False)[0] * self.gamma
-                        dist = self.push_fun(dist) / self.N
-                        push_loss = -dist.mean()
+                        all_proxies = torch.cat((self.prototypes, adapted_proxies))
+                        T = binarize_and_smooth_labels(targets, len(all_proxies), self.smoothing)
+                        D = torch.cdist(old_features, all_proxies) ** 2
+                        push_loss = torch.sum(-T * F.log_softmax(-D * self.tau, -1), -1).mean() * self.beta
 
-                    total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
-                    if logits is not None:
-                        val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
+                    total_loss, kd_loss = self.distill_knowledge(nca_loss + push_loss, adapted_features, old_features)
                     valid_loss.append(float(bsz * total_loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
-                    valid_ce_loss.append(float(bsz * ce_loss))
+                    valid_nca_loss.append(float(bsz * nca_loss))
                     valid_push_loss.append(float(bsz * push_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
-            train_ce_loss = sum(train_ce_loss) / len(trn_loader.dataset)
+            train_nca_loss = sum(train_nca_loss) / len(trn_loader.dataset)
             train_push_loss = sum(train_push_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-            valid_ce_loss = sum(valid_ce_loss) / len(val_loader.dataset)
+            valid_nca_loss = sum(valid_nca_loss) / len(val_loader.dataset)
             valid_push_loss = sum(valid_push_loss) / len(val_loader.dataset)
 
-            train_acc = train_hits / len(trn_loader.dataset)
-            val_acc = val_hits / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} CE: {train_ce_loss:.2f} Push: {train_push_loss:.2f} Acc: {100 * train_acc:.2f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} CE: {valid_ce_loss:.2f} Push: {valid_push_loss:.2f} Acc: {100 * val_acc:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} NCA: {train_nca_loss:.2f} Push: {train_push_loss:.2f}"
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} NCA: {valid_nca_loss:.2f} Push: {valid_push_loss:.2f}")
 
         # if t > 0:
         #     distiller.eval()
