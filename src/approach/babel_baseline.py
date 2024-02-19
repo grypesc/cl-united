@@ -198,7 +198,7 @@ class Appr(Inc_Learning_Appr):
             for i in range(self.N):
                 d = torch.cdist(features[i], self.prototypes[i, :, :])
                 if self.K == 1:
-                    indices = [10*j + i for j in range(self.prototypes.shape[0] // 10)]
+                    indices = [10*j + i for j in range(10)]
                     d = d - torch.mean(d, dim=1).unsqueeze(1)
                     d = d / torch.std(d, dim=1).unsqueeze(1)
                     d[:, indices] *= self.tau
