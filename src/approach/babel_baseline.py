@@ -197,11 +197,6 @@ class Appr(Inc_Learning_Appr):
             dist = []
             for i in range(self.N):
                 d = torch.cdist(features[i], self.prototypes[i, :, :])
-                if self.K == 1:
-                    indices = [10*j + i for j in range(10)]
-                    d = d - torch.mean(d, dim=1).unsqueeze(1)
-                    d = d / torch.std(d, dim=1).unsqueeze(1)
-                    d[:, indices] *= self.tau
                 dist.append(d)
             dist = torch.stack(dist, dim=2)
             dist = torch.mean(dist, dim=2)
@@ -217,12 +212,7 @@ class Appr(Inc_Learning_Appr):
 def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, use_negative_class, device):
     old_model = copy.deepcopy(model)
     old_model.eval()
-    if use_negative_class:
-        model = train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loader, nepochs, wd, alpha, device)
-    elif t == 0:
-        model = train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
-    else:
-        model = train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
+    model = train_task(model, old_model, t, trn_loader, val_loader, nepochs, wd, alpha, device)
 
     if t > 0:
         print(f"{os.getpid()}: ### Adapting prototypes ###")
@@ -231,182 +221,17 @@ def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_
     return copy.deepcopy(model), copy.deepcopy(prototypes)
 
 
-def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device):
-    print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-    print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
-    distiller = nn.Linear(64, 64)
-
-    distiller.to(device, non_blocking=True)
-    criterion = CE(num_classes_in_t, 64, device)
-    parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, wd, 0.1, nepochs)
-
-    for epoch in range(nepochs):
-        train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-        train_hits, val_hits = 0, 0
-        model.train()
-        criterion.train()
-        distiller.train()
-        for images, targets in trn_loader:
-            targets -= task_offset[t]
-            bsz = images.shape[0]
-            images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
-            optimizer.zero_grad()
-            features = model(images)
-            loss, logits = criterion(features, targets)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(parameters, 1)
-            optimizer.step()
-            if logits is not None:
-                train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
-            train_loss.append(float(bsz * loss))
-        lr_scheduler.step()
-
-        model.eval()
-        criterion.eval()
-        distiller.eval()
-        with torch.no_grad():
-            for images, targets in val_loader:
-                targets -= task_offset[t]
-                bsz = images.shape[0]
-                images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
-                features = model(images)
-                loss, logits = criterion(features, targets)
-                if logits is not None:
-                    val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
-                valid_loss.append(float(bsz * loss))
-
-        train_loss = sum(train_loss) / len(trn_loader.dataset)
-        train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
-        valid_loss = sum(valid_loss) / len(val_loader.dataset)
-        valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-
-        train_acc = train_hits / len(trn_loader.dataset)
-        val_acc = val_hits / len(val_loader.dataset)
-
-        print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
-              f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
-    return model
-
-def prepare_expert_loader(loader, classes, use_negative_class):
-    if use_negative_class:
-        images = copy.deepcopy(loader.dataset.images)
-        targets = copy.deepcopy(np.array(loader.dataset.labels))
-        labels = np.unique(targets)
-        for c in labels:
-            if c not in classes:
-                targets[targets == c] = -1
-        for i, c in enumerate(classes):
-            targets[targets == c] = i
-        targets[targets == -1] = i+1
-    else:
-        is_in = np.isin(loader.dataset.labels, classes)
-        images = copy.deepcopy(loader.dataset.images[is_in])
-        targets = copy.deepcopy(np.array(loader.dataset.labels)[is_in])
-        for i, c in enumerate(classes):
-            targets[targets == c] = i
-
-    ds = BabelMemoryDataset(images, targets, transforms=loader.dataset.transform)
-    return torch.utils.data.DataLoader(ds, batch_size=loader.batch_size, num_workers=0, shuffle=True)
-
-
-def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device):
+def train_task(model, old_model, t, trn_loader, val_loader, nepochs, wd, alpha, device):
     print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
     print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
 
     # Prepare expert loaders
     all_classes = np.unique(trn_loader.dataset.labels)
-    classes = random.sample(list(all_classes), K)
-    print(classes)
-
-    expert_train_loader = prepare_expert_loader(trn_loader, classes, False)
-    expert_val_loader = prepare_expert_loader(val_loader, classes, False)
+    offset = min(all_classes)
 
     distiller.to(device, non_blocking=True)
-    criterion = CE(len(classes), 64, device)
-    parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-    optimizer, lr_scheduler = get_optimizer(parameters, 0, 0.1, nepochs)
-
-    for epoch in range(nepochs):
-        train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-        train_hits, val_hits = 0, 0
-        model.train()
-        criterion.train()
-        distiller.train()
-        train_iterator = iter(trn_loader)
-        for expert_images, expert_targets in expert_train_loader:
-            expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
-            images, _ = next(train_iterator)
-            images = images.to(device, non_blocking=True)
-            optimizer.zero_grad()
-            expert_features = model(expert_images)
-            features = model(images)
-            if epoch < 10:
-                features = features.detach()
-                expert_features = expert_features.detach()
-            loss, logits = criterion(expert_features, expert_targets)
-            with torch.no_grad():
-                old_features = old_model(images)
-            total_loss, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(parameters, 1)
-            optimizer.step()
-            train_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
-            train_loss.append(float(expert_images.shape[0] * loss))
-            train_kd_loss.append(float(images.shape[0] * kd_loss))
-        lr_scheduler.step()
-
-        model.eval()
-        criterion.eval()
-        distiller.eval()
-        with torch.no_grad():
-            val_iterator = iter(val_loader)
-            for expert_images, expert_targets in expert_val_loader:
-                expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
-                images, _ = next(val_iterator)
-                images = images.to(device, non_blocking=True)
-                expert_features = model(expert_images)
-                features = model(images)
-                loss, logits = criterion(expert_features, expert_targets)
-                old_features = old_model(images)
-
-                _, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
-                val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
-                valid_loss.append(float(expert_images.shape[0] * loss))
-                valid_kd_loss.append(float(images.shape[0] * kd_loss))
-
-        train_loss = sum(train_loss) / len(trn_loader.dataset)
-        train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
-        valid_loss = sum(valid_loss) / len(val_loader.dataset)
-        valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-
-        train_acc = train_hits / len(expert_train_loader.dataset)
-        val_acc = val_hits / len(expert_val_loader.dataset)
-
-        print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
-              f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
-    return model
-
-
-def train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loader, nepochs, wd, alpha, device):
-    print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
-    print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
-    distiller = nn.Linear(64, 64)
-
-    # Prepare expert loaders
-    all_classes = np.unique(trn_loader.dataset.labels)
-    if K == 1:
-        classes = [all_classes[expert_id]]
-    else:
-        classes = random.sample(list(all_classes), K)
-    print(f'{os.getpid()}: Training on classes: {classes}')
-
-    expert_train_loader = prepare_expert_loader(trn_loader, classes, True)
-    expert_val_loader = prepare_expert_loader(val_loader, classes, True)
-
-    distiller.to(device, non_blocking=True)
-    criterion = CE(len(classes)+1, 64, device)
+    criterion = CE(len(all_classes), 64, device)
     parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
     optimizer, lr_scheduler = get_optimizer(parameters, wd if t == 0 else 0, 0.1, nepochs)
 
@@ -416,46 +241,48 @@ def train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loa
         model.train()
         criterion.train()
         distiller.train()
-        for expert_images, expert_targets in expert_train_loader:
-            expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
+        for images, targets in trn_loader:
+            images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+            targets -= offset
             optimizer.zero_grad()
-            expert_features = model(expert_images)
-            if epoch < 10 and t > 0:
-                expert_features = expert_features.detach()
-            loss, logits = criterion(expert_features, expert_targets)
+            features = model(images)
+            if epoch < 10:
+                features = features.detach()
+            loss, logits = criterion(features, targets)
             with torch.no_grad():
-                old_features = old_model(expert_images) if t > 0 else None
-            total_loss, kd_loss = distill_knowledge(loss, expert_features, distiller, old_features, alpha)
+                old_features = old_model(images) if t > 0 else None
+            total_loss, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(parameters, 1)
             optimizer.step()
-            train_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
-            train_loss.append(float(expert_images.shape[0] * loss))
-            train_kd_loss.append(float(expert_images.shape[0] * kd_loss))
+            train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
+            train_loss.append(float(images.shape[0] * loss))
+            train_kd_loss.append(float(images.shape[0] * kd_loss))
         lr_scheduler.step()
 
         model.eval()
         criterion.eval()
         distiller.eval()
         with torch.no_grad():
-            for expert_images, expert_targets in expert_val_loader:
-                expert_images, expert_targets = expert_images.to(device, non_blocking=True), expert_targets.to(device, non_blocking=True)
-                expert_features = model(expert_images)
-                loss, logits = criterion(expert_features, expert_targets)
-                old_features = old_model(expert_images) if t > 0 else None
+            for images, targets in val_loader:
+                images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+                targets -= offset
+                features = model(images)
+                loss, logits = criterion(features, targets)
+                old_features = old_model(images) if t > 0 else None
 
-                _, kd_loss = distill_knowledge(loss, expert_features, distiller, old_features, alpha)
-                val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
-                valid_loss.append(float(expert_images.shape[0] * loss))
-                valid_kd_loss.append(float(expert_images.shape[0] * kd_loss))
+                _, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
+                val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
+                valid_loss.append(float(images.shape[0] * loss))
+                valid_kd_loss.append(float(images.shape[0] * kd_loss))
 
-        train_loss = sum(train_loss) / len(expert_train_loader.dataset)
-        train_kd_loss = sum(train_kd_loss) / len(expert_train_loader.dataset)
-        valid_loss = sum(valid_loss) / len(expert_val_loader.dataset)
-        valid_kd_loss = sum(valid_kd_loss) / len(expert_val_loader.dataset)
+        train_loss = sum(train_loss) / len(trn_loader.dataset)
+        train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+        valid_loss = sum(valid_loss) / len(val_loader.dataset)
+        valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
 
-        train_acc = train_hits / len(expert_train_loader.dataset)
-        val_acc = val_hits / len(expert_val_loader.dataset)
+        train_acc = train_hits / len(trn_loader.dataset)
+        val_acc = val_hits / len(val_loader.dataset)
 
         print(f"{os.getpid()}: Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
