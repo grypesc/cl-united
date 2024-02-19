@@ -38,7 +38,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, tau=3, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=5, strategy="constant", num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=10, smoothing=0., activation_function="relu", nnet="resnet32"):
+                 logger=None, N=5, full_initial=False, strategy="constant", num_processes=1, use_negative=False, K=3, S=64, distiller="linear", alpha=10, smoothing=0., activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -54,6 +54,7 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.patience = patience
         self.use_negative_class = use_negative
+        self.full_initial = full_initial
         self.alpha_strategy = strategy
         self.old_model = None
         self.model = None
@@ -107,6 +108,10 @@ class Appr(Inc_Learning_Appr):
                             default="relu")
         parser.add_argument('--use-negative',
                             help='Adapt prototypes',
+                            action='store_true',
+                            default=False)
+        parser.add_argument('--full-initial',
+                            help='xxx',
                             action='store_true',
                             default=False)
         parser.add_argument('--distiller',
@@ -171,6 +176,7 @@ class Appr(Inc_Learning_Appr):
                                                                         self.task_offset,
                                                                         alphas[offset + j],
                                                                         self.use_negative_class,
+                                                                        self.full_initial,
                                                                         self.device))
                                     for j in range(self.num_processes)]
                 results.extend([res.get() for res in multiple_results])
@@ -214,15 +220,15 @@ class Appr(Inc_Learning_Appr):
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
 
-def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, use_negative_class, device):
+def train_child(model, prototypes, K, expert_id, trn_loader, val_loader, t, num_classes_in_t, wd, nepochs, task_offset, alpha, use_negative_class, full_initial, device):
     old_model = copy.deepcopy(model)
     old_model.eval()
-    if use_negative_class:
-        model = train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loader, nepochs, wd, alpha, device)
-    elif t == 0:
+    if full_initial and t == 0:
         model = train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepochs, task_offset, device)
+    elif use_negative_class:
+        model = train_incremental_neg(model, old_model, t, K, expert_id, trn_loader, val_loader, nepochs, wd, alpha, device)
     else:
-        model = train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device)
+        model = train_incremental(model, old_model, t, K, trn_loader, val_loader, nepochs, alpha, device)
 
     if t > 0:
         print(f"{os.getpid()}: ### Adapting prototypes ###")
@@ -288,6 +294,7 @@ def train_initial(model, t, trn_loader, val_loader, num_classes_in_t, wd, nepoch
               f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
     return model
 
+
 def prepare_expert_loader(loader, classes, use_negative_class):
     if use_negative_class:
         images = copy.deepcopy(loader.dataset.images)
@@ -310,7 +317,7 @@ def prepare_expert_loader(loader, classes, use_negative_class):
     return torch.utils.data.DataLoader(ds, batch_size=loader.batch_size, num_workers=0, shuffle=True)
 
 
-def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alpha, device):
+def train_incremental(model, old_model, t, K, trn_loader, val_loader, nepochs, alpha, device):
     print(f'{os.getpid()}: The model has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
     print(f'{os.getpid()}: The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
     distiller = nn.Linear(64, 64)
@@ -347,7 +354,7 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
                 expert_features = expert_features.detach()
             loss, logits = criterion(expert_features, expert_targets)
             with torch.no_grad():
-                old_features = old_model(images)
+                old_features = old_model(images) if t > 0 else None
             total_loss, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(parameters, 1)
@@ -369,7 +376,7 @@ def train_incremental(model, old_model, K, trn_loader, val_loader, nepochs, alph
                 expert_features = model(expert_images)
                 features = model(images)
                 loss, logits = criterion(expert_features, expert_targets)
-                old_features = old_model(images)
+                old_features = old_model(images) if t > 0 else None
 
                 _, kd_loss = distill_knowledge(loss, features, distiller, old_features, alpha)
                 val_hits += float(torch.sum((torch.argmax(logits, dim=1) == expert_targets)))
