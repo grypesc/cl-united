@@ -11,6 +11,7 @@ from torchmetrics import Accuracy
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
+from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_nca import ProxyNCA
 from .criterions.ce import CE
@@ -36,6 +37,7 @@ class Appr(Inc_Learning_Appr):
         self.old_model = None
         self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
                       "resnet14": resnet14(num_features=S, activation_function=activation_function),
+                      "resnet18": resnet18(num_features=S),
                       "resnet20": resnet20(num_features=S, activation_function=activation_function),
                       "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
         self.model.fc = nn.Identity()
@@ -101,7 +103,7 @@ class Appr(Inc_Learning_Appr):
                             default=0.0)
         parser.add_argument('--nnet',
                             type=str,
-                            choices=["resnet8", "resnet14", "resnet20", "resnet32"],
+                            choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
                             default="resnet32")
         return parser.parse_known_args(args)
 
@@ -245,7 +247,7 @@ class Appr(Inc_Learning_Appr):
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_prototypes = copy.deepcopy(self.prototypes)
-        for epoch in range(self.nepochs):
+        for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
             for images, _ in trn_loader:
@@ -336,9 +338,7 @@ class Appr(Inc_Learning_Appr):
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(distiller(features), old_features)
-        if self.criterion.__name__ == "ABCLoss":
-            kd_loss *= 1000
-        total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
+        total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
     def get_optimizer(self, parameters, wd):
