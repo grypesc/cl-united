@@ -168,7 +168,7 @@ class Appr(Inc_Learning_Appr):
                     adapted_proxies = distiller(proxies)
                     all_proxies = torch.cat((self.prototypes, adapted_proxies))
                     T = binarize_and_smooth_labels(targets, len(all_proxies), self.smoothing)
-                    D = torch.cdist(old_features, all_proxies) ** 2
+                    D = torch.cdist(adapted_features, all_proxies) ** 2
                     push_loss = torch.sum(-T * F.log_softmax(-D * self.tau, -1), -1).mean() * self.beta
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss + push_loss, adapted_features, old_features)
@@ -197,7 +197,7 @@ class Appr(Inc_Learning_Appr):
                         adapted_proxies = distiller(proxies)
                         all_proxies = torch.cat((self.prototypes, adapted_proxies))
                         T = binarize_and_smooth_labels(targets, len(all_proxies), self.smoothing)
-                        D = torch.cdist(old_features, all_proxies) ** 2
+                        D = torch.cdist(adapted_features, all_proxies) ** 2
                         push_loss = torch.sum(-T * F.log_softmax(-D * self.tau, -1), -1).mean() * self.beta
 
                     total_loss, kd_loss = self.distill_knowledge(nca_loss + push_loss, adapted_features, old_features)
