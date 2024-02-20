@@ -66,7 +66,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--gamma',
                             help='number of learners sampled for task',
                             type=float,
-                            default=0.01)
+                            default=1)
         parser.add_argument('--S',
                             help='latent space size',
                             type=int,
@@ -161,6 +161,8 @@ class Appr(Inc_Learning_Appr):
                 if epoch < 10 and t > 0:
                     features = features.detach()
                 nca_loss, _, proxies = criterion(features, targets - self.task_offset[t])
+                if t > 0:
+                    nca_loss *= self.gamma
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
@@ -191,6 +193,8 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     nca_loss, _, proxies = criterion(features, targets - self.task_offset[t])
+                    if t > 0:
+                        nca_loss *= self.gamma
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
                     if t > 0 and epoch > 20:
