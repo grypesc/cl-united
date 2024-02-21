@@ -123,9 +123,9 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         if t < self.freeze_after:
             self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
-        if t > 0 and self.adapt:
-            print("### Adapting prototypes ###")
-            self.adapt_prototypes(t, trn_loader, val_loader)
+            if t > 0 and self.adapt:
+                print("### Adapting prototypes ###")
+                self.adapt_prototypes(t, trn_loader, val_loader)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
