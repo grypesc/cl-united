@@ -73,7 +73,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=0.5)
+                            default=0.8)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -343,12 +343,12 @@ class Appr(Inc_Learning_Appr):
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(distiller(features), old_features)
-        total_loss = loss + self.alpha * kd_loss
+        total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
     def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
-        milestones = (int(0.4*self.nepochs), int(0.8*self.nepochs))
+        milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.8*self.nepochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
