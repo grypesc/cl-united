@@ -379,7 +379,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
