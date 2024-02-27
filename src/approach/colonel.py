@@ -180,7 +180,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 1 and t > 0:
+                if epoch < 10 and t > 0:
                     features = features.detach()
                 logits = head(features)
                 ce_loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
@@ -278,7 +278,7 @@ class Appr(Inc_Learning_Appr):
                                     )
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
-        for epoch in range(self.nepochs):
+        for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
             for images, _ in trn_loader:
