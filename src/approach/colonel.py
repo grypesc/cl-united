@@ -149,53 +149,55 @@ class Appr(Inc_Learning_Appr):
 
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
-            distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+            distiller = nn.Sequential(nn.Linear(self.S, 4 * self.S),
                                       nn.ReLU(),
-                                      nn.Linear(2 * self.S, self.S)
+                                      nn.Linear(4 * self.S, self.S)
                                       )
 
         head = nn.Linear(self.S, num_classes_in_t)
         if self.head_type == "mlp":
-            head = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+            head = nn.Sequential(nn.Linear(self.S, 4 * self.S),
                                  nn.ReLU(),
-                                 nn.Linear(2 * self.S, num_classes_in_t)
+                                 nn.Linear(4 * self.S, num_classes_in_t)
                                  )
 
         distiller.to(self.device, non_blocking=True)
         head.to(self.device)
         parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(head.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), self.nepochs)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
+            train_push_loss, val_push_loss = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
             head.train()
             distiller.train()
+            push_loss = 0
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 10 and t > 0:
+                if epoch < 1 and t > 0:
                     features = features.detach()
                 logits = head(features)
-                loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
+                ce_loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
                 if t > 0:
                     dist = torch.cdist(adapted_features, self.prototypes)
-                    dist = torch.topk(dist, 11, 1, largest=False)[0]
-                    dist = torch.sqrt(dist) / self.beta
-                    loss += -dist.mean()
-                total_loss, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
+                    dist = torch.clamp(self.beta - dist, min=0.0) ** 2
+                    push_loss = dist.mean()
+                total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
                 train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
-                train_loss.append(float(bsz * loss))
+                train_loss.append(float(bsz * ce_loss))
+                train_push_loss.append(float(bsz * push_loss))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
@@ -209,24 +211,32 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     logits = head(features)
-                    loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
+                    ce_loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
-                    _, kd_loss = self.distill_knowledge(loss, adapted_features, old_features)
+                    if t > 0:
+                        dist = torch.cdist(adapted_features, self.prototypes)
+                        dist = torch.clamp(self.beta - dist, min=0.0) ** 2
+                        push_loss = dist.mean()
+
+                    _, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
                     val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
-                    valid_loss.append(float(bsz * loss))
+                    valid_loss.append(float(bsz * ce_loss))
+                    val_push_loss.append(float(bsz * push_loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+            train_push_loss = sum(train_push_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
+            val_push_loss = sum(val_push_loss) / len(trn_loader.dataset)
 
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Push: {train_push_loss:.3f} Acc: {100 * train_acc:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Push: {val_push_loss:.3f} Acc: {100 * val_acc:.2f}")
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -262,9 +272,9 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
-            adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+            adapter = nn.Sequential(nn.Linear(self.S, 4 * self.S),
                                     nn.ReLU(),
-                                    nn.Linear(2 * self.S, self.S)
+                                    nn.Linear(4 * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
@@ -336,12 +346,13 @@ class Appr(Inc_Learning_Appr):
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(adapted_features, old_features)
-        total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
+        total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
-    def get_optimizer(self, parameters, wd, milestones=(40, 80)):
+    def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
+        milestones = (int(0.4*epochs), int(0.8*epochs))
+        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=self.momentum)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
