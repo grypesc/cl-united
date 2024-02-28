@@ -48,7 +48,10 @@ class ResNet(nn.Module):
         self.layer1 = self._make_layer(block, 16, layers[0])
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
-        self.bottleneck = nn.Conv2d(64, num_features, 1, stride=1)
+        if num_features is None:
+            self.bottleneck = None
+        else:
+            self.bottleneck = nn.Conv2d(64, num_features, 1, stride=1)
         self.normalize = normalize
         self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -78,7 +81,8 @@ class ResNet(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.bottleneck(x)
+        if self.bottleneck is not None:
+            x = self.bottleneck(x)
         features = torch.mean(x, dim=(2, 3))
         if self.normalize:
             features = torch.nn.functional.normalize(features, dim=1)

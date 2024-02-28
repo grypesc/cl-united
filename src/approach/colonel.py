@@ -30,6 +30,8 @@ class Appr(Inc_Learning_Appr):
 
         self.N = N
         self.K = K
+        if K > N:
+            raise RuntimeError("K cannot be grater than N")
         self.S = S
         self.beta = beta
         self.adapt = adapt
@@ -40,7 +42,7 @@ class Appr(Inc_Learning_Appr):
         self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
                       "resnet14": resnet14(num_features=S, activation_function=activation_function),
                       "resnet20": resnet20(num_features=S, activation_function=activation_function),
-                      "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
+                      "resnet32": resnet32(num_features=None, activation_function=activation_function)}[nnet]
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
@@ -180,10 +182,10 @@ class Appr(Inc_Learning_Appr):
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
-                if t > 0:
-                    dist = torch.cdist(adapted_features, self.prototypes)
-                    dist = torch.clamp(self.beta - dist, min=0.0) ** 2
-                    push_loss = dist.mean()
+                # if t > 0:
+                #     dist = torch.cdist(adapted_features, self.prototypes)
+                #     dist = torch.clamp(self.beta - dist, min=0.0) ** 2
+                #     push_loss = dist.mean()
                 total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
@@ -207,10 +209,10 @@ class Appr(Inc_Learning_Appr):
                     ce_loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
-                    if t > 0:
-                        dist = torch.cdist(adapted_features, self.prototypes)
-                        dist = torch.clamp(self.beta - dist, min=0.0) ** 2
-                        push_loss = dist.mean()
+                    # if t > 0:
+                    #     dist = torch.cdist(adapted_features, self.prototypes)
+                    #     dist = torch.clamp(self.beta - dist, min=0.0) ** 2
+                    #     push_loss = dist.mean()
 
                     _, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
                     val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
@@ -257,7 +259,10 @@ class Appr(Inc_Learning_Appr):
                 from_ += bsz
 
             # Calculate centroid
-            new_protos = class_features[:self.N]
+            if self.N == 1:
+                new_protos = torch.mean(class_features, dim=0).unsqueeze(0)
+            else:
+                new_protos = class_features[:self.N]
             self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
             self.prototypes_class = torch.cat((self.prototypes_class, torch.full((self.N,), fill_value=c, device=self.device)), dim=0)
 
@@ -308,7 +313,6 @@ class Appr(Inc_Learning_Appr):
         with torch.no_grad():
             adapter.eval()
             self.prototypes = adapter(self.prototypes)
-
 
     @torch.no_grad()
     def eval(self, t, val_loader):
