@@ -139,13 +139,6 @@ class Appr(Inc_Learning_Appr):
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
-        # Freeze batch norms
-        if t > 0:
-            for m in self.model.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.eval()
-                    m.weight.requires_grad = False
-                    m.bias.requires_grad = False
 
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
@@ -230,7 +223,7 @@ class Appr(Inc_Learning_Appr):
             train_push_loss = sum(train_push_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-            val_push_loss = sum(val_push_loss) / len(trn_loader.dataset)
+            val_push_loss = sum(val_push_loss) / len(val_loader.dataset)
 
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
