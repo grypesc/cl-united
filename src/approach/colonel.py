@@ -21,7 +21,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
-    def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
+    def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1, cross_batch_distill=False, cross_batch_adapt=False,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=True, activation_function="relu", nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
@@ -33,6 +33,8 @@ class Appr(Inc_Learning_Appr):
         if K > N:
             raise RuntimeError("K cannot be grater than N")
         self.S = S
+        self.cross_batch_distill = cross_batch_distill
+        self.cross_batch_adapt = cross_batch_adapt
         self.beta = beta
         self.adapt = adapt
         self.alpha = alpha
@@ -89,6 +91,14 @@ class Appr(Inc_Learning_Appr):
                             help='Adapt prototypes',
                             action='store_true',
                             default=True)
+        parser.add_argument('--cross-batch-distill',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
+        parser.add_argument('--cross-batch-adapt',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--activation-function',
                             help='Activation functions in resnet',
                             type=str,
@@ -160,15 +170,13 @@ class Appr(Inc_Learning_Appr):
         head.to(self.device)
         parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(head.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), self.nepochs)
-
+        old_features = None
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-            train_push_loss, val_push_loss = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
             head.train()
             distiller.train()
-            push_loss = 0
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
@@ -179,20 +187,19 @@ class Appr(Inc_Learning_Appr):
                     features = features.detach()
                 logits = head(features)
                 ce_loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
+                if self.cross_batch_distill and t > 0:
+                    images = self.interpolate_cross_batch(images)
+                    features = self.model(images)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
                 adapted_features = distiller(features) if t > 0 else None
-                # if t > 0:
-                #     dist = torch.cdist(adapted_features, self.prototypes)
-                #     dist = torch.clamp(self.beta - dist, min=0.0) ** 2
-                #     push_loss = dist.mean()
-                total_loss, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
+
+                total_loss, kd_loss = self.distill_knowledge(ce_loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
                 train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * ce_loss))
-                train_push_loss.append(float(bsz * push_loss))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
@@ -207,6 +214,11 @@ class Appr(Inc_Learning_Appr):
                     features = self.model(images)
                     logits = head(features)
                     ce_loss = torch.nn.functional.cross_entropy(logits, targets, label_smoothing=self.smoothing)
+
+                    if self.cross_batch_distill and t > 0:
+                        images = self.interpolate_cross_batch(images)
+                        features = self.model(images)
+
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
                     # if t > 0:
@@ -214,31 +226,36 @@ class Appr(Inc_Learning_Appr):
                     #     dist = torch.clamp(self.beta - dist, min=0.0) ** 2
                     #     push_loss = dist.mean()
 
-                    _, kd_loss = self.distill_knowledge(ce_loss + push_loss, adapted_features, old_features)
+                    _, kd_loss = self.distill_knowledge(ce_loss, adapted_features, old_features)
                     val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * ce_loss))
-                    val_push_loss.append(float(bsz * push_loss))
                     valid_kd_loss.append(float(bsz * kd_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
-            train_push_loss = sum(train_push_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-            val_push_loss = sum(val_push_loss) / len(val_loader.dataset)
 
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Push: {train_push_loss:.3f} Acc: {100 * train_acc:.2f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Push: {val_push_loss:.3f} Acc: {100 * val_acc:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
+
+    def interpolate_cross_batch(self, images):
+        bsz = images.shape[0]
+        idx = torch.randint(0, high=bsz - 1, size=(bsz, 2), device=self.device)
+        weights = torch.rand((bsz, 1, 1, 1), device=self.device)
+        weights = torch.stack((weights, 1 - weights), dim=1)
+        images_interpolated = images[idx[:, 0]] * weights[:, 0] + images[idx[:, 1]] * weights[:, 1]
+        return images_interpolated
+
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
         """ Create distributions for task t"""
         self.model.eval()
         transforms = val_loader.dataset.transform
-        model = self.model
         for c in range(num_classes_in_t):
             c = c + self.task_offset[t]
             train_indices = torch.tensor(trn_loader.dataset.labels) == c
@@ -254,7 +271,7 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = model(images)
+                features = self.model(images)
                 class_features[from_: from_+bsz] = features
                 from_ += bsz
 
@@ -282,6 +299,8 @@ class Appr(Inc_Learning_Appr):
             for images, _ in trn_loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
+                if self.cross_batch_adapt:
+                    images = self.interpolate_cross_batch(images)
                 optimizer.zero_grad()
                 with torch.no_grad():
                     target = self.model(images)
@@ -299,6 +318,8 @@ class Appr(Inc_Learning_Appr):
                 for images, _ in val_loader:
                     bsz = images.shape[0]
                     images = images.to(self.device, non_blocking=True)
+                    if self.cross_batch_adapt:
+                        images = self.interpolate_cross_batch(images)
                     target = self.model(images)
                     old_features = self.old_model(images)
                     adapted_features = adapter(old_features)
