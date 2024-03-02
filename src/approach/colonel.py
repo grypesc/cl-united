@@ -170,7 +170,7 @@ class Appr(Inc_Learning_Appr):
         head.to(self.device)
         parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(head.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), self.nepochs)
-        old_features = None
+
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
             train_hits, val_hits = 0, 0
@@ -221,10 +221,6 @@ class Appr(Inc_Learning_Appr):
 
                     old_features = self.old_model(images) if t > 0 else None
                     adapted_features = distiller(features) if t > 0 else None
-                    # if t > 0:
-                    #     dist = torch.cdist(adapted_features, self.prototypes)
-                    #     dist = torch.clamp(self.beta - dist, min=0.0) ** 2
-                    #     push_loss = dist.mean()
 
                     _, kd_loss = self.distill_knowledge(ce_loss, adapted_features, old_features)
                     val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
