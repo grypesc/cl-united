@@ -203,27 +203,36 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         trn_transform_list.append(transforms.RandomHorizontalFlip())
 
     trn_transform_list.append(transforms.ColorJitter(brightness=63 / 255))
-    if extra_aug == 'fetril':  # Similar as in PyCIL
-        if 'cifar' in ds_name.lower():
-            trn_transform_list.append(CIFAR10Policy())
-        elif 'imagenet' in ds_name.lower():
-            trn_transform_list.append(ImageNetPolicy())
-        elif 'domainnet' in ds_name.lower():
-            trn_transform_list.append(ImageNetPolicy())
-        else:
-            raise RuntimeError(f'Please check and update the data agumentation code for your dataset: {ds_name}')
+    if "cifar" in ds_name.lower():
+        trn_transform_list = [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=63 / 255),
+            CIFAR10Policy(),
+        ]
+    elif "tinyimagenet200" in ds_name.lower():
+        trn_transform_list = [
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.ToPILImage()
+        ]
+    elif "imagenet100" in ds_name.lower():
+        trn_transform_list = [
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.ToPILImage()
+        ]
       
     # to tensor
     trn_transform_list.append(transforms.ToTensor())
     tst_transform_list.append(transforms.ToTensor())
-    
-    if extra_aug == 'fetril':  # Similar as in PyCIL
-        trn_transform_list.append(Cutout(n_holes=1, length=16))
    
     # normalization
-    if normalize is not None:
-        trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
-        tst_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
+    # if normalize is not None:
+    #     trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
+    #     tst_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
 
     # gray to rgb
     if extend_channel is not None:
