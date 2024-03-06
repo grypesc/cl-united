@@ -9,21 +9,21 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
-from .criterions.abc import ABCLoss
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
+from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_nca import ProxyNCA
-from .criterions.ce import CE
 
 torch.backends.cuda.matmul.allow_tf32 = False
+
 
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1, cross_batch_distill=False, cross_batch_adapt=False,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=True, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=True, nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -41,10 +41,11 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
-        self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
-                      "resnet14": resnet14(num_features=S, activation_function=activation_function),
-                      "resnet20": resnet20(num_features=S, activation_function=activation_function),
-                      "resnet32": resnet32(num_features=None, activation_function=activation_function)}[nnet]
+        self.model = {"resnet8": resnet8(num_features=S),
+                      "resnet14": resnet14(num_features=S),
+                      "resnet20": resnet20(num_features=S),
+                      "resnet32": resnet32(num_features=None),
+                      "resnet18": resnet18(num_features=S, is_32=True)}[nnet]
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
@@ -99,11 +100,6 @@ class Appr(Inc_Learning_Appr):
                             help='xxx',
                             action='store_true',
                             default=False)
-        parser.add_argument('--activation-function',
-                            help='Activation functions in resnet',
-                            type=str,
-                            choices=["identity", "relu", "lrelu"],
-                            default="relu")
         parser.add_argument('--distiller',
                             help='Distiller',
                             type=str,
@@ -120,7 +116,7 @@ class Appr(Inc_Learning_Appr):
                             default=0.0)
         parser.add_argument('--nnet',
                             type=str,
-                            choices=["resnet8", "resnet14", "resnet20", "resnet32"],
+                            choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
                             default="resnet32")
         return parser.parse_known_args(args)
 
