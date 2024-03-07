@@ -155,7 +155,7 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 4 * self.S),
-                                      nn.ReLU(),
+                                      nn.LeakyReLU(),
                                       nn.Linear(4 * self.S, self.S)
                                       )
 
@@ -175,7 +175,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 10 and t > 0:
+                if epoch < 20 and t > 0:
                     features = features.detach()
                 nca_loss, _, _ = criterion(features, targets)
                 if self.cross_batch_distill and t > 0:
@@ -187,7 +187,7 @@ class Appr(Inc_Learning_Appr):
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
                 train_loss.append(float(bsz * nca_loss))
                 train_kd_loss.append(float(bsz * kd_loss))
@@ -249,19 +249,21 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=True)
             from_ = 0
-            class_features = torch.zeros((len(ds), self.S), device=self.device)
+            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
                 features = self.model(images)
                 class_features[from_: from_+bsz] = features
-                from_ += bsz
+                features = self.model(torch.flip(images, dims=(3,)))
+                class_features[from_+bsz: from_+2*bsz] = features
+                from_ += 2*bsz
 
             # Calculate centroid
             if self.N == 1:
                 new_protos = torch.mean(class_features, dim=0).unsqueeze(0)
             else:
-                new_protos = class_features[:self.N]
+                new_protos = class_features[::2][:self.N]
             self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
             self.prototypes_class = torch.cat((self.prototypes_class, torch.full((self.N,), fill_value=c, device=self.device)), dim=0)
 
@@ -270,7 +272,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 4 * self.S),
-                                    nn.ReLU(),
+                                    nn.LeakyReLU(),
                                     nn.Linear(4 * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
@@ -290,7 +292,7 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(adapter.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step()
