@@ -184,7 +184,11 @@ class ResNet(nn.Module):
                                        dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(last_block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
-        self.bottleneck = nn.Conv2d(512, num_features, 1, stride=1)
+        if num_features is None:
+            self.bottleneck = None
+            num_features = 512
+        else:
+            self.bottleneck = nn.Conv2d(512, num_features, 1, stride=1)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(num_features, num_classes)
 
@@ -240,7 +244,8 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        x = self.bottleneck(x)
+        if self.bottleneck is not None:
+            x = self.bottleneck(x)
         x = self.avgpool(x)
         features = torch.flatten(x, 1)
         x = self.fc(features)
