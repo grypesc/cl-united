@@ -230,9 +230,9 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
     tst_transform_list.append(transforms.ToTensor())
    
     # normalization
-    # if normalize is not None:
-    #     trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
-    #     tst_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
+    if normalize is not None:
+        trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
+        tst_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
 
     # gray to rgb
     if extend_channel is not None:

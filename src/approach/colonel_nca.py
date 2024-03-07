@@ -23,7 +23,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1, cross_batch_distill=False, cross_batch_adapt=False,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=True, nnet="resnet32"):
+                 logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, use_gt_features=False, nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -36,7 +36,7 @@ class Appr(Inc_Learning_Appr):
         self.cross_batch_distill = cross_batch_distill
         self.cross_batch_adapt = cross_batch_adapt
         self.beta = beta
-        self.adapt = adapt
+        self.use_gt_features = use_gt_features
         self.alpha = alpha
         self.smoothing = smoothing
         self.patience = patience
@@ -88,10 +88,10 @@ class Appr(Inc_Learning_Appr):
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
                             default=0.95)
-        parser.add_argument('--adapt',
-                            help='Adapt prototypes',
+        parser.add_argument('--use-gt-features',
+                            help='Use GT features instead of adapting',
                             action='store_true',
-                            default=True)
+                            default=False)
         parser.add_argument('--cross-batch-distill',
                             help='xxx',
                             action='store_true',
@@ -131,9 +131,11 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        if t > 0 and self.adapt:
+        if t > 0 and not self.use_gt_features:
             print("### Adapting prototypes ###")
             self.adapt_prototypes(t, trn_loader, val_loader)
+        elif t > 0 and self.use_gt_features:
+            self.adapt_prototypes_gt(t, val_loader)
         print("### Creating new prototypes ###")
         self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
@@ -164,6 +166,7 @@ class Appr(Inc_Learning_Appr):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
             self.model.train()
             distiller.train()
+            criterion.train()
             for images, targets in trn_loader:
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
@@ -190,6 +193,7 @@ class Appr(Inc_Learning_Appr):
 
             self.model.eval()
             distiller.eval()
+            criterion.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
                     targets -= self.task_offset[t]
@@ -243,7 +247,7 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=True)
             from_ = 0
-            class_features = torch.full((len(ds), self.S), fill_value=-999999999.0, device=self.device)
+            class_features = torch.zeros((len(ds), self.S), device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
@@ -345,8 +349,8 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
-        milestones = (int(0.4*epochs), int(0.8*epochs))
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=self.momentum)
+        milestones = (int(0.3*epochs), int(0.6*epochs), int(0.8*epochs))
+        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -355,6 +359,40 @@ class Appr(Inc_Learning_Appr):
         optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
+
+    @torch.no_grad()
+    def adapt_prototypes_gt(self, t, val_loader):
+        """ Use GT data loaders to calculate features"""
+        self.model.eval()
+        self.prototypes = torch.empty((0, self.S), device=self.device)
+        self.prototypes_class = torch.empty((0, ), dtype=torch.int, device=self.device)
+        transforms = val_loader.dataset.transform
+        for trn_loader in self.train_data_loaders[:-1]:
+            for c in list(np.unique(trn_loader.dataset.labels)):
+                train_indices = torch.tensor(trn_loader.dataset.labels) == c
+                if isinstance(trn_loader.dataset.images, list):
+                    train_images = list(compress(trn_loader.dataset.images, train_indices))
+                    ds = ClassDirectoryDataset(train_images, transforms)
+                else:
+                    ds = trn_loader.dataset.images[train_indices]
+                    ds = ClassMemoryDataset(ds, transforms)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=True)
+                from_ = 0
+                class_features = torch.zeros((len(ds), self.S), device=self.device)
+                for images in loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device, non_blocking=True)
+                    features = self.model(images)
+                    class_features[from_: from_+bsz] = features
+                    from_ += bsz
+
+                # Calculate centroid
+                if self.N == 1:
+                    new_protos = torch.mean(class_features, dim=0).unsqueeze(0)
+                else:
+                    new_protos = class_features[:self.N]
+                self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
+                self.prototypes_class = torch.cat((self.prototypes_class, torch.full((self.N,), fill_value=c, device=self.device)), dim=0)
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
