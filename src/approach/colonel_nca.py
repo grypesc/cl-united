@@ -44,10 +44,10 @@ class Appr(Inc_Learning_Appr):
         self.model = {"resnet8": resnet8(num_features=S),
                       "resnet14": resnet14(num_features=S),
                       "resnet20": resnet20(num_features=S),
-                      "resnet32": resnet32(num_features=None),
-                      "resnet18": resnet18(num_features=None, is_32=True)}[nnet]
-        if nnet == "resnet18":
-            self.S = 512
+                      "resnet32": resnet32(num_features=S),
+                      "resnet18": resnet18(num_features=S, is_32=True)}[nnet]
+        # if nnet == "resnet18":
+        #     self.S = 512
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
