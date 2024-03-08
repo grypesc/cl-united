@@ -353,7 +353,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
-        milestones = (int(0.3*epochs), int(0.6*epochs), int(0.8*epochs))
+        milestones = (int(0.4*epochs), int(0.8*epochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
