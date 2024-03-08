@@ -162,7 +162,7 @@ class Appr(Inc_Learning_Appr):
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=0)
         parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(criterion.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), self.nepochs)
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd, self.nepochs)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
