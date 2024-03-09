@@ -263,13 +263,13 @@ class Appr(Inc_Learning_Appr):
 
                 if t > 0 and epoch > 30:
                     if iteration % 4 == 0:
-                        adapted_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, 0.01, 3)
+                        adapted_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, 0.01, 3).detach()
                         self.model.train()
 
-                        dist = torch.cdist(features, adapted_prototypes)
-                        dist = torch.topk(dist, self.K, 1, largest=False)[0]
-                        dist = torch.clamp(self.margin - dist, min=0.0) ** 2
-                        push_loss = dist.mean()
+                    dist = torch.cdist(features, adapted_prototypes)
+                    dist = torch.topk(dist, self.K, 1, largest=False)[0]
+                    dist = torch.clamp(self.margin - dist, min=0.0) ** 2
+                    push_loss = dist.mean()
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss + push_loss, distilled_features, old_features)
                 total_loss.backward()
