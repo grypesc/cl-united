@@ -26,9 +26,9 @@ class Adapter(torch.nn.Module):
         self.device = device
         self.nn = nn.Linear(S, S)
         if adapter_type == "mlp":
-            self.nn = nn.Sequential(nn.Linear(S, 4 * S),
-                                    nn.LeakyReLU(),
-                                    nn.Linear(4 * S, S)
+            self.nn = nn.Sequential(nn.Linear(S, 16 * S),
+                                    nn.GELU(),
+                                    nn.Linear(16 * S, S)
                                     )
 
     def forward(self, trn_loader, val_loader, model, old_model, prototypes, lr, epochs):
@@ -96,7 +96,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1, cross_batch_distill=False, cross_batch_adapt=False,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=11, S=64, margin=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, use_gt_features=False, nnet="resnet32"):
+                 logger=None, N=10, K=11, S=64, margin=100, distiller="linear", head="linear", alpha=10, beta=1, smoothing=0., sval_fraction=0.95, use_gt_features=False, nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -111,6 +111,7 @@ class Appr(Inc_Learning_Appr):
         self.margin = margin
         self.use_gt_features = use_gt_features
         self.alpha = alpha
+        self.beta = beta
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
@@ -158,7 +159,11 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=0.5)
+                            default=10)
+        parser.add_argument('--beta',
+                            help='relative weight of kd loss',
+                            type=float,
+                            default=1)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -230,7 +235,7 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, 4 * self.S),
-                                      nn.LeakyReLU(),
+                                      nn.GELU(),
                                       nn.Linear(4 * self.S, self.S)
                                       )
 
@@ -261,15 +266,16 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images) if t > 0 else None
                 distilled_features = distiller(features) if t > 0 else None
 
-                if t > 0 and epoch > 30:
+                if t > 0 and epoch > 40:
                     if iteration % 4 == 0:
-                        adapted_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, 0.01, 3).detach()
+                        # adapted_prototypes = adapter(trn_loader, val_loader, self.model, self.old_model, self.prototypes, 0.01, 3).detach()
+                        adapted_prototypes = self.adapt_prototypes_gt(t, val_loader)
                         self.model.train()
 
                     dist = torch.cdist(features, adapted_prototypes)
                     dist = torch.topk(dist, self.K, 1, largest=False)[0]
                     dist = torch.clamp(self.margin - dist, min=0.0) ** 2
-                    push_loss = dist.mean()
+                    push_loss = dist.mean() * self.beta
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss + push_loss, distilled_features, old_features)
                 total_loss.backward()
@@ -298,11 +304,11 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images) if t > 0 else None
                     distilled_features = distiller(features) if t > 0 else None
 
-                    if t > 0 and epoch > 30:
+                    if t > 0 and epoch > 40:
                         dist = torch.cdist(features, adapted_prototypes)
                         dist = torch.topk(dist, self.K, 1, largest=False)[0]
                         dist = torch.clamp(self.margin - dist, min=0.0) ** 2
-                        push_loss = dist.mean()
+                        push_loss = dist.mean() * self.beta
 
                     _, kd_loss = self.distill_knowledge(nca_loss + push_loss, distilled_features, old_features)
 
@@ -317,8 +323,8 @@ class Appr(Inc_Learning_Appr):
             valid_push_loss = sum(valid_push_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Push: {train_push_loss:.2f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Push: {valid_push_loss:.2f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Push: {train_push_loss:.3f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Push: {valid_push_loss:.3f}")
 
     def interpolate_cross_batch(self, images):
         bsz = images.shape[0]
@@ -368,7 +374,7 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 4 * self.S),
-                                    nn.LeakyReLU(),
+                                    nn.GELU(),
                                     nn.Linear(4 * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
@@ -464,8 +470,8 @@ class Appr(Inc_Learning_Appr):
     def adapt_prototypes_gt(self, t, val_loader):
         """ Use GT data loaders to calculate features"""
         self.model.eval()
-        self.prototypes = torch.empty((0, self.S), device=self.device)
-        self.prototypes_class = torch.empty((0, ), dtype=torch.int, device=self.device)
+        prototypes = torch.empty((0, self.S), device=self.device)
+        # self.prototypes_class = torch.empty((0, ), dtype=torch.int, device=self.device)
         transforms = val_loader.dataset.transform
         for trn_loader in self.train_data_loaders[:-1]:
             for c in list(np.unique(trn_loader.dataset.labels)):
@@ -491,8 +497,9 @@ class Appr(Inc_Learning_Appr):
                     new_protos = torch.mean(class_features, dim=0).unsqueeze(0)
                 else:
                     new_protos = class_features[:self.N]
-                self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
-                self.prototypes_class = torch.cat((self.prototypes_class, torch.full((self.N,), fill_value=c, device=self.device)), dim=0)
+                prototypes = torch.cat((self.prototypes, new_protos), dim=0)
+                # self.prototypes_class = torch.cat((self.prototypes_class, torch.full((self.N,), fill_value=c, device=self.device)), dim=0)
+        return prototypes
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
