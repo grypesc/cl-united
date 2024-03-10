@@ -497,7 +497,7 @@ class Appr(Inc_Learning_Appr):
                     new_protos = torch.mean(class_features, dim=0).unsqueeze(0)
                 else:
                     new_protos = class_features[:self.N]
-                prototypes = torch.cat((self.prototypes, new_protos), dim=0)
+                prototypes = torch.cat((prototypes, new_protos), dim=0)
                 # self.prototypes_class = torch.cat((self.prototypes_class, torch.full((self.N,), fill_value=c, device=self.device)), dim=0)
         return prototypes
 
