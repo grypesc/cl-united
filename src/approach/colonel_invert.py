@@ -22,7 +22,7 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1, cross_batch_distill=False, cross_batch_adapt=False,
-                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 momentum=0, wd=0, multi_softmax=False, eps=0, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, use_gt_features=False, nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -35,9 +35,10 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.cross_batch_distill = cross_batch_distill
         self.cross_batch_adapt = cross_batch_adapt
-        self.beta = beta
         self.use_gt_features = use_gt_features
         self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
@@ -86,6 +87,10 @@ class Appr(Inc_Learning_Appr):
                             help='relative weight of kd loss',
                             type=float,
                             default=0.5)
+        parser.add_argument('--eps',
+                            help='relative weight of kd loss',
+                            type=float,
+                            default=0.0)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -159,7 +164,7 @@ class Appr(Inc_Learning_Appr):
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=0)
         parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(criterion.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0), self.nepochs)
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd, self.nepochs)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -172,7 +177,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 20 and t > 0:
+                if t > 0 and (epoch < 10 or epoch > 190):
                     features = features.detach()
                 nca_loss, _, _ = criterion(features, targets)
                 if self.cross_batch_distill and t > 0:
@@ -236,12 +241,14 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def adapt_protos_from_distiller(self, distiller):
-        W = copy.deepcopy(distiller.weight.data.detach())
-        b = copy.deepcopy(distiller.bias.data.detach())
+        distiller.eval()
+        W = copy.deepcopy(distiller.weight.data.detach()) + torch.eye(self.S, device=self.device) * self.eps
         rank = torch.linalg.matrix_rank(W)
         print(f"Rank: {rank}")
-        adapted_protos = torch.linalg.solve(W.T, self.prototypes - b.unsqueeze(0), left=False)
-        return adapted_protos
+        inverted_W = torch.linalg.inv(W)
+        b = copy.deepcopy(distiller.bias.data.detach())
+        adapted_protos = inverted_W.unsqueeze(0) @ (self.prototypes - b.unsqueeze(0)).unsqueeze(2)
+        return adapted_protos.squeeze(2)
 
     @torch.no_grad()
     def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -312,7 +319,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
-        milestones = (int(0.3*epochs), int(0.6*epochs), int(0.8*epochs))
+        milestones = (int(0.4*epochs), int(0.8*epochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
