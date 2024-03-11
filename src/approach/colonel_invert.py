@@ -17,10 +17,13 @@ from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_yolo import ProxyYolo
 
+hidden_size = -1
+
 
 def subnet_fc(c_in, c_out):
-    return nn.Sequential(nn.Linear(c_in, 512), nn.ReLU(),
-                        nn.Linear(512,  c_out))
+    return nn.Sequential(nn.Linear(c_in, hidden_size),
+                         nn.ReLU(),
+                         nn.Linear(hidden_size,  c_out))
 
 
 class Appr(Inc_Learning_Appr):
@@ -28,7 +31,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1, cross_batch_distill=False, cross_batch_adapt=False,
                  momentum=0, wd=0, multi_softmax=False, eps=0, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, K=11, S=64, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, use_gt_features=False, nnet="resnet32"):
+                 logger=None, N=10, K=11, S=64, flow_depth=1, flow_width=512, beta=100, distiller="linear", head="linear", alpha=0.5, smoothing=0., sval_fraction=0.95, use_gt_features=False, nnet="resnet32"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -38,6 +41,10 @@ class Appr(Inc_Learning_Appr):
         if K > N:
             raise RuntimeError("K cannot be grater than N")
         self.S = S
+        self.flow_depth = flow_depth
+        self.flow_width = flow_width
+        global hidden_size
+        hidden_size = flow_width
         self.cross_batch_distill = cross_batch_distill
         self.cross_batch_adapt = cross_batch_adapt
         self.use_gt_features = use_gt_features
@@ -61,10 +68,8 @@ class Appr(Inc_Learning_Appr):
         self.prototypes_class = torch.empty((0, ), dtype=torch.int, device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.head_type = head
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
-        self.distiller_type = distiller
 
 
 
@@ -84,6 +89,14 @@ class Appr(Inc_Learning_Appr):
                             help='latent space size',
                             type=int,
                             default=64)
+        parser.add_argument('--flow-depth',
+                            help='x',
+                            type=int,
+                            default=1)
+        parser.add_argument('--flow-width',
+                            help='x',
+                            type=int,
+                            default=512)
         parser.add_argument('--beta',
                             help='latent space size',
                             type=int,
@@ -160,16 +173,18 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
 
         distiller = Ff.SequenceINN(self.S)
-        for k in range(1):
+        for k in range(self.flow_depth):
             distiller.append(Fm.AllInOneBlock, subnet_constructor=subnet_fc, permute_soft=True)
 
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=0)
         parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(criterion.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd, self.nepochs)
+        adapted_features = None
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
+            train_inv_err, val_inv_err = [], []
             self.model.train()
             distiller.train()
             criterion.train()
@@ -187,7 +202,11 @@ class Appr(Inc_Learning_Appr):
                     features = self.model(images)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                adapted_features, _ = distiller(features) if t > 0 else (None, None)
+                if t > 0:
+                    adapted_features, _ = distiller(features)
+                    with torch.no_grad():
+                        inverted_adapted_features, _ = distiller(adapted_features, rev=True)
+                        train_inv_err.append(bsz*torch.mean(torch.abs(features - inverted_adapted_features)))
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
                 total_loss.backward()
@@ -213,7 +232,12 @@ class Appr(Inc_Learning_Appr):
                         features = self.model(images)
 
                     old_features = self.old_model(images) if t > 0 else None
-                    adapted_features, log_jac_det = distiller(features) if t > 0 else (None, None)
+                    adapted_features, _ = distiller(features)
+                    if t > 0:
+                        adapted_features, _ = distiller(features)
+                        with torch.no_grad():
+                            inverted_adapted_features, _ = distiller(adapted_features, rev=True)
+                            val_inv_err.append(bsz * torch.mean(torch.abs(features - inverted_adapted_features)))
 
                     _, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
 
@@ -222,11 +246,13 @@ class Appr(Inc_Learning_Appr):
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+            train_inv_err = sum(train_inv_err) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
+            val_inv_err = sum(val_inv_err) / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} "
-                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f}")
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Inv. err: {train_inv_err:.8f} "
+                  f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Inv. err: {val_inv_err:.8f}")
 
         print("### Adapting protos via inverting distiller ###")
         if t > 0:
@@ -321,8 +347,8 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
-        milestones = (int(0.4*epochs), int(0.8*epochs))
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
+        milestones = (int(0.3*epochs), int(0.6*epochs), int(0.9*epochs))
+        optimizer = torch.optim.Adam(parameters, lr=self.lr, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
