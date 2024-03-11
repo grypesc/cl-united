@@ -2,6 +2,8 @@ import copy
 import random
 import torch
 import numpy as np
+import FrEIA.framework as Ff
+import FrEIA.modules as Fm
 
 from argparse import ArgumentParser
 from itertools import compress
@@ -15,7 +17,10 @@ from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_yolo import ProxyYolo
 
-torch.backends.cuda.matmul.allow_tf32 = False
+
+def subnet_fc(c_in, c_out):
+    return nn.Sequential(nn.Linear(c_in, 512), nn.ReLU(),
+                        nn.Linear(512,  c_out))
 
 
 class Appr(Inc_Learning_Appr):
@@ -154,12 +159,9 @@ class Appr(Inc_Learning_Appr):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
 
-        distiller = nn.Linear(self.S, self.S)
-        if self.distiller_type == "mlp":
-            distiller = nn.Sequential(nn.Linear(self.S, 4 * self.S),
-                                      nn.LeakyReLU(),
-                                      nn.Linear(4 * self.S, self.S)
-                                      )
+        distiller = Ff.SequenceINN(self.S)
+        for k in range(1):
+            distiller.append(Fm.AllInOneBlock, subnet_constructor=subnet_fc, permute_soft=True)
 
         distiller.to(self.device, non_blocking=True)
         criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=0)
@@ -177,7 +179,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and (epoch < 10 or epoch > 190):
+                if t > 0 and epoch < 5:
                     features = features.detach()
                 nca_loss, _, _ = criterion(features, targets)
                 if self.cross_batch_distill and t > 0:
@@ -185,7 +187,7 @@ class Appr(Inc_Learning_Appr):
                     features = self.model(images)
                 with torch.no_grad():
                     old_features = self.old_model(images) if t > 0 else None
-                adapted_features = distiller(features) if t > 0 else None
+                adapted_features, _ = distiller(features) if t > 0 else (None, None)
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
                 total_loss.backward()
@@ -211,7 +213,7 @@ class Appr(Inc_Learning_Appr):
                         features = self.model(images)
 
                     old_features = self.old_model(images) if t > 0 else None
-                    adapted_features = distiller(features) if t > 0 else None
+                    adapted_features, log_jac_det = distiller(features) if t > 0 else (None, None)
 
                     _, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
 
@@ -229,7 +231,7 @@ class Appr(Inc_Learning_Appr):
         print("### Adapting protos via inverting distiller ###")
         if t > 0:
             distiller.eval()
-            self.prototypes = self.adapt_protos_from_distiller(distiller)
+            self.prototypes, _ = distiller(self.prototypes, rev=True)
 
     def interpolate_cross_batch(self, images):
         bsz = images.shape[0]
@@ -321,12 +323,6 @@ class Appr(Inc_Learning_Appr):
         """Returns the optimizer"""
         milestones = (int(0.4*epochs), int(0.8*epochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
-        return optimizer, scheduler
-
-    def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
-        """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
