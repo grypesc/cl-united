@@ -22,7 +22,7 @@ hidden_size = -1
 
 def subnet_fc(c_in, c_out):
     return nn.Sequential(nn.Linear(c_in, hidden_size),
-                         nn.ReLU(),
+                         nn.LeakyReLU(),
                          nn.Linear(hidden_size,  c_out))
 
 
