@@ -194,7 +194,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and epoch < 5:
+                if t > 0 and epoch < 10:
                     features = features.detach()
                 nca_loss, _, _ = criterion(features, targets)
                 if self.cross_batch_distill and t > 0:
@@ -206,7 +206,7 @@ class Appr(Inc_Learning_Appr):
                     adapted_features, _ = distiller(features)
                     with torch.no_grad():
                         inverted_adapted_features, _ = distiller(adapted_features, rev=True)
-                        train_inv_err.append(bsz*torch.mean(torch.abs(features - inverted_adapted_features)))
+                        train_inv_err.append(float(bsz*torch.mean(torch.abs(features - inverted_adapted_features))))
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
                 total_loss.backward()
@@ -237,7 +237,7 @@ class Appr(Inc_Learning_Appr):
                         adapted_features, _ = distiller(features)
                         with torch.no_grad():
                             inverted_adapted_features, _ = distiller(adapted_features, rev=True)
-                            val_inv_err.append(bsz * torch.mean(torch.abs(features - inverted_adapted_features)))
+                            val_inv_err.append(float(bsz * torch.mean(torch.abs(features - inverted_adapted_features))))
 
                     _, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
 
@@ -257,7 +257,8 @@ class Appr(Inc_Learning_Appr):
         print("### Adapting protos via inverting distiller ###")
         if t > 0:
             distiller.eval()
-            self.prototypes, _ = distiller(self.prototypes, rev=True)
+            with torch.no_grad():
+                self.prototypes, _ = distiller(self.prototypes, rev=True)
 
     def interpolate_cross_batch(self, images):
         bsz = images.shape[0]
@@ -347,8 +348,8 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
-        milestones = (int(0.3*epochs), int(0.6*epochs), int(0.9*epochs))
-        optimizer = torch.optim.Adam(parameters, lr=self.lr, weight_decay=wd)
+        milestones = (int(0.4*epochs), int(0.8*epochs))
+        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
