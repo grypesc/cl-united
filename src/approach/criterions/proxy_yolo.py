@@ -31,6 +31,6 @@ class ProxyYolo(torch.nn.Module):
         T = binarize_and_smooth_labels(T, len(P), self.smoothing)
         D = torch.cdist(X, P) ** 2
         loss = torch.sum(-T * F.log_softmax(-D/self.temperature, -1), -1)
-        return loss.mean(), None, self.proxies
+        return loss.mean(), None
 
 

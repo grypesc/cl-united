@@ -14,7 +14,10 @@ from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_nca import ProxyNCA
+from .criterions.proxy_yolo import ProxyYolo
 from .criterions.ce import CE
+
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 
 class Appr(Inc_Learning_Appr):
@@ -22,7 +25,8 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10, freeze_after=999, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=0.5, smoothing=0., sval_fraction=0.95, adapt=False, activation_function="relu", nnet="resnet32"):
+                 logger=None, N=10000, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
+                 adapt_mean=False, adapt_cov=False, activation_function="relu", nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -30,25 +34,27 @@ class Appr(Inc_Learning_Appr):
         self.N = N
         self.K = K
         self.S = S
-        self.adapt = adapt
+        self.adapt_mean = adapt_mean
+        self.adapt_cov = adapt_cov
         self.alpha = alpha
         self.smoothing = smoothing
         self.patience = patience
         self.old_model = None
         self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
                       "resnet14": resnet14(num_features=S, activation_function=activation_function),
-                      "resnet18": resnet18(num_features=S),
+                      "resnet18": resnet18(num_features=S, is_32=True),
                       "resnet20": resnet20(num_features=S, activation_function=activation_function),
                       "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
-        self.prototypes = torch.empty((0, self.S), device=self.device)
+        self.means = torch.empty((0, self.S), device=self.device)
+        self.covs = torch.empty((0, self.S, self.S), device=self.device)
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.criterion = {"proxy-nca": ProxyNCA,
-                          "ce" : CE}[criterion]
-        self.freeze_after = freeze_after
+        self.criterion = {"proxy-yolo": ProxyYolo,
+                          "proxy-nca": ProxyNCA,
+                          "ce": CE}[criterion]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -60,9 +66,9 @@ class Appr(Inc_Learning_Appr):
         """Returns a parser containing the approach specific parameters"""
         parser = ArgumentParser()
         parser.add_argument('--N',
-                            help='Number of learners',
+                            help='Number of samples to adapt cov',
                             type=float,
-                            default=100)
+                            default=10000)
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
@@ -71,22 +77,22 @@ class Appr(Inc_Learning_Appr):
                             help='latent space size',
                             type=int,
                             default=64)
-        parser.add_argument('--freeze-after',
-                            help='latent space size',
-                            type=int,
-                            default=999)
         parser.add_argument('--alpha',
                             help='relative weight of kd loss',
                             type=float,
-                            default=0.8)
+                            default=10)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
                             default=0.95)
-        parser.add_argument('--adapt',
+        parser.add_argument('--adapt-mean',
                             help='Adapt prototypes',
                             action='store_true',
-                            default=True)
+                            default=False)
+        parser.add_argument('--adapt-cov',
+                            help='Adapt prototypes',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--activation-function',
                             help='Activation functions in resnet',
                             type=str,
@@ -100,8 +106,8 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca", "abc"],
-                            default="proxy-nca")
+                            choices=["ce", "proxy-nca", "proxy-yolo"],
+                            default="proxy-yolo")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -109,7 +115,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
-                            default="resnet32")
+                            default="resnet18")
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
@@ -121,19 +127,18 @@ class Appr(Inc_Learning_Appr):
         self.old_model.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
-        if t < self.freeze_after:
-            self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
-            if t > 0 and self.adapt:
-                print("### Adapting prototypes ###")
-                self.adapt_prototypes(t, trn_loader, val_loader)
+        self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
+        if t > 0 and (self.adapt_cov or self.adapt_mean):
+            print("### Adapting prototypes ###")
+            self.adapt_prototypes(t, trn_loader, val_loader)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
-        self.create_prototypes(t, trn_loader, val_loader, num_classes_in_t)
+        self.create_distirbutions(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
 
         print("Proto norm statistics:")
-        norms = torch.norm(self.prototypes, dim=1)
+        norms = torch.norm(self.means, dim=1)
         print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
         print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
 
@@ -150,7 +155,7 @@ class Appr(Inc_Learning_Appr):
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd * (t == 0))
+        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -164,7 +169,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < 10 and t > 0:
+                if epoch < int(self.nepochs * 0.1) and t > 0:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
@@ -172,7 +177,7 @@ class Appr(Inc_Learning_Appr):
 
                 total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
@@ -210,12 +215,13 @@ class Appr(Inc_Learning_Appr):
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
     @torch.no_grad()
-    def create_prototypes(self, t, trn_loader, val_loader, num_classes_in_t):
+    def create_distirbutions(self, t, trn_loader, val_loader, num_classes_in_t):
         """ Create distributions for task t"""
         self.model.eval()
         transforms = val_loader.dataset.transform
         model = self.model
-        new_protos = torch.zeros((num_classes_in_t, self.S), device=self.device)
+        new_means = torch.zeros((num_classes_in_t, self.S), device=self.device)
+        new_covs = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
         for c in range(num_classes_in_t):
             train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
             if isinstance(trn_loader.dataset.images, list):
@@ -238,21 +244,27 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate centroid
             centroid = class_features.mean(dim=0)
-            new_protos[c] = centroid
+            new_means[c] = centroid
 
-        self.prototypes = torch.cat((self.prototypes, new_protos), dim=0)
+            cov = torch.cov(class_features.T)
+            new_covs[c] = cov
+
+        self.means = torch.cat((self.means, new_means), dim=0)
+        self.covs = torch.cat((self.covs, new_covs), dim=0)
 
     def adapt_prototypes(self, t, trn_loader, val_loader):
+        # Train the adapter
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
-                                      nn.GELU(),
-                                      nn.Linear(2 * self.S, self.S)
-                                      )
+                                    nn.GELU(),
+                                    nn.Linear(2 * self.S, self.S)
+                                    )
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
-        old_prototypes = copy.deepcopy(self.prototypes)
+        old_means = copy.deepcopy(self.means)
+        old_covs = copy.deepcopy(self.covs)
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
@@ -266,7 +278,7 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(adapter.parameters(), self.clipgrad)
+                torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
             lr_scheduler.step()
@@ -286,18 +298,29 @@ class Appr(Inc_Learning_Appr):
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
 
-        # Calculate new prototypes
+        # Adapt
         with torch.no_grad():
             adapter.eval()
-            self.prototypes = adapter(self.prototypes)
+            if self.adapt_mean:
+                self.means = adapter(self.means)
+
+            if self.adapt_cov:
+                for c in range(self.means.shape[0]):
+                    distribution = MultivariateNormal(self.means[c], self.covs[c])
+                    samples = distribution.sample((self.N,))
+                    adapted_samples = adapter(samples)
+                    self.means[c] = adapted_samples.mean(0)
+                    self.covs[c] = torch.cov(adapted_samples.T)
 
             # Evaluation
+            print("")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
-                old_dist, new_dist = [], []
+                old_mean_diff, new_mean_diff = [], []
+                old_cov_diff, new_cov_diff = [], []
                 class_images = np.concatenate([dl.dataset.images for dl in loaders])
                 labels = np.concatenate([dl.dataset.labels for dl in loaders])
 
-                for c in range(old_prototypes.shape[0]):
+                for c in range(old_means.shape[0]):
                     train_indices = torch.tensor(labels) == c
 
                     if isinstance(trn_loader.dataset.images, list):
@@ -317,26 +340,34 @@ class Appr(Inc_Learning_Appr):
                         class_features[from_+bsz: from_+2*bsz] = features
                         from_ += 2*bsz
 
+                    gt_mean = class_features.mean(0)
+                    gt_cov = torch.cov(class_features.T)
                     # Calculate distance to old prototype
-                    old_dist.append(torch.cdist(class_features, old_prototypes[c].unsqueeze(0)).mean())
-                    new_dist.append(torch.cdist(class_features, self.prototypes[c].unsqueeze(0)).mean())
+                    old_mean_diff.append((gt_mean - old_means[c]).norm())
+                    old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
+                    new_mean_diff.append((gt_mean - self.means[c]).norm())
+                    new_cov_diff.append(torch.norm(gt_cov - self.covs[c]))
 
-                old_dist = torch.stack(old_dist)
-                new_dist = torch.stack(new_dist)
-                print(f"Old {subset} distance: {old_dist.mean():.2f} ± {old_dist.std():.2f}")
-                print(f"New {subset} distance: {new_dist.mean():.2f} ± {new_dist.std():.2f}")
+                old_mean_diff = torch.stack(old_mean_diff)
+                new_mean_diff = torch.stack(new_mean_diff)
+                old_cov_diff = torch.stack(old_cov_diff)
+                new_cov_diff = torch.stack(new_cov_diff)
+                print(f"Old {subset} mean diff: {old_mean_diff.mean():.2f} ± {old_mean_diff.std():.2f}")
+                print(f"New {subset} mean diff: {new_mean_diff.mean():.2f} ± {new_mean_diff.std():.2f}")
+                print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
+                print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
 
     @torch.no_grad()
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
         self.model.eval()
-        tag_acc = Accuracy("multiclass", num_classes=self.prototypes.shape[0])
+        tag_acc = Accuracy("multiclass", num_classes=self.means.shape[0])
         taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
         offset = self.task_offset[t]
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
             features = self.model(images)
-            dist = torch.cdist(features, self.prototypes)
+            dist = torch.cdist(features, self.means)
             tag_preds = torch.argmin(dist, dim=1)
             taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
 
@@ -349,17 +380,17 @@ class Appr(Inc_Learning_Appr):
         if old_features is None:
             return loss, 0
         kd_loss = nn.functional.mse_loss(distiller(features), old_features)
-        total_loss = (1 - self.alpha) * loss + self.alpha * kd_loss
+        total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
     def get_optimizer(self, parameters, wd):
         """Returns the optimizer"""
-        milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.8*self.nepochs))
+        milestones = (int(0.4*self.nepochs), int(0.8*self.nepochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
-    def get_adapter_optimizer(self, parameters, milestones=(40, 80)):
+    def get_adapter_optimizer(self, parameters, milestones=(30, 60, 90)):
         """Returns the optimizer"""
         optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
