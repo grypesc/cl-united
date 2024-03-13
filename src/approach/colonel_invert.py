@@ -181,7 +181,7 @@ class Appr(Inc_Learning_Appr):
         parameters = [
             {"params": self.model.parameters(), "lr": self.lr},
             {"params": criterion.parameters(), "lr": self.lr},
-            {"params": distiller.parameters(), "lr": self.lr},
+            {"params": distiller.parameters(), "lr": 0.1*self.lr},
         ]
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd, self.nepochs)
         adapted_features = None
@@ -215,7 +215,7 @@ class Appr(Inc_Learning_Appr):
                 total_loss, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
-                torch.nn.utils.clip_grad_norm_(distiller.parameters(), 1)
+                torch.nn.utils.clip_grad_norm_(distiller.parameters(), 10)
                 torch.nn.utils.clip_grad_norm_(criterion.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * nca_loss))
