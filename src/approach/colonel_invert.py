@@ -15,7 +15,7 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
-from .criterions.proxy_yolo import ProxyYolo
+from .criterions.proxy_nca import ProxyNCA
 
 hidden_size = -1
 
@@ -177,8 +177,12 @@ class Appr(Inc_Learning_Appr):
             distiller.append(Fm.AllInOneBlock, subnet_constructor=subnet_fc, permute_soft=True)
 
         distiller.to(self.device, non_blocking=True)
-        criterion = ProxyYolo(num_classes_in_t, self.S, self.device, smoothing=0)
-        parameters = list(self.model.parameters()) + list(distiller.parameters()) + list(criterion.parameters())
+        criterion = ProxyNCA(num_classes_in_t, self.S, self.device, smoothing_const=0)
+        parameters = [
+            {"params": self.model.parameters(), "lr": self.lr},
+            {"params": criterion.parameters(), "lr": self.lr},
+            {"params": distiller.parameters(), "lr": 10*self.lr},
+        ]
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd, self.nepochs)
         adapted_features = None
 
@@ -194,9 +198,9 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if t > 0 and epoch < 10:
+                if t > 0 and epoch < int(self.nepochs * 0.1):
                     features = features.detach()
-                nca_loss, _, _ = criterion(features, targets)
+                nca_loss, _ = criterion(features, targets)
                 if self.cross_batch_distill and t > 0:
                     images = self.interpolate_cross_batch(images)
                     features = self.model(images)
@@ -210,7 +214,9 @@ class Appr(Inc_Learning_Appr):
 
                 total_loss, kd_loss = self.distill_knowledge(nca_loss, adapted_features, old_features)
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(parameters, 1)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1)
+                torch.nn.utils.clip_grad_norm_(distiller.parameters(), 1)
+                torch.nn.utils.clip_grad_norm_(criterion.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * nca_loss))
                 train_kd_loss.append(float(bsz * kd_loss))
@@ -225,7 +231,7 @@ class Appr(Inc_Learning_Appr):
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
-                    nca_loss, _, _ = criterion(features, targets)
+                    nca_loss, _ = criterion(features, targets)
 
                     if self.cross_batch_distill and t > 0:
                         images = self.interpolate_cross_batch(images)
@@ -349,7 +355,7 @@ class Appr(Inc_Learning_Appr):
     def get_optimizer(self, parameters, wd, epochs):
         """Returns the optimizer"""
         milestones = (int(0.4*epochs), int(0.8*epochs))
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
+        optimizer = torch.optim.AdamW(parameters, lr=self.lr, weight_decay=wd)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
