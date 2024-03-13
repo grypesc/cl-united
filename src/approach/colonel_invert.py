@@ -181,7 +181,7 @@ class Appr(Inc_Learning_Appr):
         parameters = [
             {"params": self.model.parameters(), "lr": self.lr},
             {"params": criterion.parameters(), "lr": self.lr},
-            {"params": distiller.parameters(), "lr": 10*self.lr},
+            {"params": distiller.parameters(), "lr": self.lr},
         ]
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd, self.nepochs)
         adapted_features = None
