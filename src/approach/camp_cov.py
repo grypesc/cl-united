@@ -340,7 +340,7 @@ class Appr(Inc_Learning_Appr):
                     gt_mean = class_features.mean(0)
                     gt_cov = torch.cov(class_features.T)
                     if self.adaptation_strategy == "diag":
-                        gt_cov[c] = torch.diag(torch.diag(gt_cov[c]))
+                        gt_cov = torch.diag(torch.diag(gt_cov))
                     # Calculate distance to old prototype
                     old_mean_diff.append((gt_mean - old_means[c]).norm())
                     old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
