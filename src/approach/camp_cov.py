@@ -26,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
-                 adapt_mean=False, adapt_cov=False, activation_function="relu", nnet="resnet18"):
+                 adaptation_strategy="mean-only", nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -34,17 +34,15 @@ class Appr(Inc_Learning_Appr):
         self.N = N
         self.K = K
         self.S = S
-        self.adapt_mean = adapt_mean
-        self.adapt_cov = adapt_cov
         self.alpha = alpha
         self.smoothing = smoothing
-        self.patience = patience
+        self.adaptation_strategy = adaptation_strategy
         self.old_model = None
-        self.model = {"resnet8": resnet8(num_features=S, activation_function=activation_function),
-                      "resnet14": resnet14(num_features=S, activation_function=activation_function),
+        self.model = {"resnet8": resnet8(num_features=S),
+                      "resnet14": resnet14(num_features=S),
                       "resnet18": resnet18(num_features=S, is_32=True),
-                      "resnet20": resnet20(num_features=S, activation_function=activation_function),
-                      "resnet32": resnet32(num_features=S, activation_function=activation_function)}[nnet]
+                      "resnet20": resnet20(num_features=S),
+                      "resnet32": resnet32(num_features=S)}[nnet]
         self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
@@ -85,24 +83,16 @@ class Appr(Inc_Learning_Appr):
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
                             default=0.95)
-        parser.add_argument('--adapt-mean',
-                            help='Adapt prototypes',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--adapt-cov',
-                            help='Adapt prototypes',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--activation-function',
+        parser.add_argument('--adaptation-strategy',
                             help='Activation functions in resnet',
                             type=str,
-                            choices=["identity", "relu", "lrelu"],
-                            default="relu")
+                            choices=["no-adapt", "mean-only", "diag", "full"],
+                            default="mean-only")
         parser.add_argument('--distiller',
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="mlp")
+                            default="linear")
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
@@ -128,7 +118,7 @@ class Appr(Inc_Learning_Appr):
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
-        if t > 0 and (self.adapt_cov or self.adapt_mean):
+        if t > 0 and self.adaptation_strategy != "no-adapt":
             print("### Adapting prototypes ###")
             self.adapt_prototypes(t, trn_loader, val_loader)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
@@ -153,7 +143,7 @@ class Appr(Inc_Learning_Appr):
                                       )
 
         distiller.to(self.device, non_blocking=True)
-        criterion = self.criterion(num_classes_in_t, self.S, self.device)
+        criterion = self.criterion(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
@@ -245,6 +235,8 @@ class Appr(Inc_Learning_Appr):
             # Calculate centroid
             new_means[c] = class_features.mean(dim=0)
             new_covs[c] = torch.cov(class_features.T)
+            if self.adaptation_strategy == "diag":
+                new_covs[c] = torch.diag(torch.diag(new_covs[c]))
             print(f"Rank: {torch.linalg.matrix_rank(new_covs[c])}")
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError("Nan in covariance matrix")
@@ -301,10 +293,10 @@ class Appr(Inc_Learning_Appr):
         # Adapt
         with torch.no_grad():
             adapter.eval()
-            if self.adapt_mean:
+            if self.adaptation_strategy == "mean-only":
                 self.means = adapter(self.means)
 
-            if self.adapt_cov:
+            if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[0]):
                     distribution = MultivariateNormal(self.means[c], self.covs[c])
                     samples = distribution.sample((self.N,))
@@ -313,6 +305,9 @@ class Appr(Inc_Learning_Appr):
                     adapted_samples = adapter(samples)
                     self.means[c] = adapted_samples.mean(0)
                     self.covs[c] = torch.cov(adapted_samples.T)
+
+                    if self.adaptation_strategy == "diag":
+                        self.covs[c] = torch.diag(torch.diag(self.covs[c]))
 
             # Evaluation
             print("")
@@ -344,6 +339,8 @@ class Appr(Inc_Learning_Appr):
 
                     gt_mean = class_features.mean(0)
                     gt_cov = torch.cov(class_features.T)
+                    if self.adaptation_strategy == "diag":
+                        gt_cov[c] = torch.diag(torch.diag(gt_cov[c]))
                     # Calculate distance to old prototype
                     old_mean_diff.append((gt_mean - old_means[c]).norm())
                     old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))

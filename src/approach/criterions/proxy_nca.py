@@ -16,7 +16,7 @@ class ProxyNCA(torch.nn.Module):
                  nb_classes,
                  sz_embedding,
                  device,
-                 smoothing_const=0.1,
+                 smoothing=0.1,
                  scaling_x=1,
                  scaling_p=3
                  ):
@@ -25,7 +25,7 @@ class ProxyNCA(torch.nn.Module):
         # i.e. proxies.norm(2, dim=1)) should be close to [1,1,...,1]
         # TODO: use norm instead of div 8, because of embedding size
         self.proxies = Parameter(torch.randn(nb_classes, sz_embedding, device=device) / 8)
-        self.smoothing_const = smoothing_const
+        self.smoothing_const = smoothing
         self.scaling_x = scaling_x
         self.scaling_p = scaling_p
 
