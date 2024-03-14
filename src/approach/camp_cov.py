@@ -242,7 +242,7 @@ class Appr(Inc_Learning_Appr):
             if self.adaptation_strategy == "full":
                 new_covs[c] = self.shrink_cov(new_covs[c], 1., 1.)
 
-            print(f"Rank: {torch.linalg.matrix_rank(new_covs[c])}")
+            print(f"Rank {c + self.task_offset[t]}: {torch.linalg.matrix_rank(new_covs[c])}")
 
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError("Nan in covariance matrix")
@@ -310,10 +310,12 @@ class Appr(Inc_Learning_Appr):
                         raise RuntimeError("Nan in samples")
                     adapted_samples = adapter(samples)
                     self.means[c] = adapted_samples.mean(0)
+                    print(f"Rank pre-adapt {c + self.task_offset[t]}: {torch.linalg.matrix_rank(self.covs[c])}")
                     self.covs[c] = torch.cov(adapted_samples.T)
-
                     if self.adaptation_strategy == "diag":
                         self.covs[c] = torch.diag(torch.diag(self.covs[c]))
+
+                    print(f"Rank post-adapt {c + self.task_offset[t]}: {torch.linalg.matrix_rank(self.covs[c])}")
 
             # Evaluation
             print("")
@@ -365,25 +367,6 @@ class Appr(Inc_Learning_Appr):
                 print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
                 print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
 
-    @torch.no_grad()
-    def eval(self, t, val_loader):
-        """ Perform nearest centroids classification """
-        self.model.eval()
-        tag_acc = Accuracy("multiclass", num_classes=self.means.shape[0])
-        taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
-        offset = self.task_offset[t]
-        for images, target in val_loader:
-            images = images.to(self.device, non_blocking=True)
-            features = self.model(images, self.is_tukey)
-            dist = torch.cdist(features, self.means)
-            tag_preds = torch.argmin(dist, dim=1)
-            taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
-
-            tag_acc.update(tag_preds.cpu(), target)
-            taw_acc.update(taw_preds.cpu(), target)
-
-        return 0, float(taw_acc.compute()), float(tag_acc.compute())
-
     def distill_knowledge(self, loss, features, distiller, old_features=None):
         if old_features is None:
             return loss, 0
@@ -403,6 +386,25 @@ class Appr(Inc_Learning_Appr):
         optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
+
+    @torch.no_grad()
+    def eval(self, t, val_loader):
+        """ Perform nearest centroids classification """
+        self.model.eval()
+        tag_acc = Accuracy("multiclass", num_classes=self.means.shape[0])
+        taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
+        offset = self.task_offset[t]
+        for images, target in val_loader:
+            images = images.to(self.device, non_blocking=True)
+            features = self.model(images, self.is_tukey)
+            dist = torch.cdist(features, self.means)
+            tag_preds = torch.argmin(dist, dim=1)
+            taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
+
+            tag_acc.update(tag_preds.cpu(), target)
+            taw_acc.update(taw_preds.cpu(), target)
+
+        return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
@@ -432,14 +434,20 @@ class Appr(Inc_Learning_Appr):
             explain = xd.shape[0]
             self.svals_explained_by[t].append(explain)
 
+    @torch.no_grad()
     def print_singular_values(self):
         print(f"{self.sval_fraction} of eigenvalues sum is explained by:")
         for t, explained_by in enumerate(self.svals_explained_by):
             print(f"Task {t}: {explained_by}")
 
+    @torch.no_grad()
     def shrink_cov(self, cov, alpha1, alpha2):
         diag_mean = torch.mean(torch.diagonal(cov))
         iden = torch.eye(cov.shape[0], device=self.device)
         mask = iden == 0.0
         off_diag_mean = torch.mean(cov[mask])
         return cov + (alpha1*diag_mean*iden) + (alpha2*off_diag_mean*(1-iden))
+
+    @torch.no_grad()
+    def mahalanobis_dist(self, x, mean, cov):
+        pass
