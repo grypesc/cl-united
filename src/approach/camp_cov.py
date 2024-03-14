@@ -122,7 +122,7 @@ class Appr(Inc_Learning_Appr):
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         if t > 0 and self.adaptation_strategy != "no-adapt":
             print("### Adapting prototypes ###")
-            self.adapt_prototypes(t, trn_loader, val_loader)
+            self.adapt_distributions(t, trn_loader, val_loader)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
@@ -250,7 +250,7 @@ class Appr(Inc_Learning_Appr):
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
 
-    def adapt_prototypes(self, t, trn_loader, val_loader):
+    def adapt_distributions(self, t, trn_loader, val_loader):
         # Train the adapter
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
@@ -347,6 +347,9 @@ class Appr(Inc_Learning_Appr):
                     gt_cov = torch.cov(class_features.T)
                     if self.adaptation_strategy == "diag":
                         gt_cov = torch.diag(torch.diag(gt_cov))
+                    if self.adaptation_strategy == "full":
+                        gt_cov = self.shrink_cov(gt_cov, 1., 1.)
+
                     # Calculate distance to old prototype
                     old_mean_diff.append((gt_mean - old_means[c]).norm())
                     old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
