@@ -245,7 +245,7 @@ class Appr(Inc_Learning_Appr):
             print(f"Rank {c + self.task_offset[t]}: {torch.linalg.matrix_rank(new_covs[c])}")
 
             if torch.isnan(new_covs[c]).any():
-                raise RuntimeError("Nan in covariance matrix")
+                raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
@@ -307,7 +307,7 @@ class Appr(Inc_Learning_Appr):
                     distribution = MultivariateNormal(self.means[c], self.covs[c])
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
-                        raise RuntimeError("Nan in samples")
+                        raise RuntimeError(f"Nan in features sampled for class {c + self.task_offset[t]}")
                     adapted_samples = adapter(samples)
                     self.means[c] = adapted_samples.mean(0)
                     print(f"Rank pre-adapt {c + self.task_offset[t]}: {torch.linalg.matrix_rank(self.covs[c])}")
