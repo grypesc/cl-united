@@ -24,7 +24,7 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
-                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
@@ -43,7 +43,6 @@ class Appr(Inc_Learning_Appr):
                       "resnet18": resnet18(num_features=S, is_32=True),
                       "resnet20": resnet20(num_features=S),
                       "resnet32": resnet32(num_features=S)}[nnet]
-        self.model.fc = nn.Identity()
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.means = torch.empty((0, self.S), device=self.device)
@@ -53,11 +52,10 @@ class Appr(Inc_Learning_Appr):
         self.criterion = {"proxy-yolo": ProxyYolo,
                           "proxy-nca": ProxyNCA,
                           "ce": CE}[criterion]
+        self.is_tukey = tukey
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
-
-
 
     @staticmethod
     def extra_parser(args):
@@ -102,6 +100,10 @@ class Appr(Inc_Learning_Appr):
                             help='label smoothing',
                             type=float,
                             default=0.0)
+        parser.add_argument('--tukey',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
@@ -123,11 +125,11 @@ class Appr(Inc_Learning_Appr):
             self.adapt_prototypes(t, trn_loader, val_loader)
         # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
-        self.create_distirbutions(t, trn_loader, val_loader, num_classes_in_t)
+        self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
 
-        print("Proto norm statistics:")
+        print("Means norm statistics:")
         norms = torch.norm(self.means, dim=1)
         print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
         print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
@@ -185,7 +187,7 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
-                    old_features = self.old_model(images) if t>0 else None
+                    old_features = self.old_model(images) if t > 0 else None
 
                     _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
                     if logits is not None:
@@ -205,7 +207,7 @@ class Appr(Inc_Learning_Appr):
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
     @torch.no_grad()
-    def create_distirbutions(self, t, trn_loader, val_loader, num_classes_in_t):
+    def create_distributions(self, t, trn_loader, val_loader, num_classes_in_t):
         """ Create distributions for task t"""
         self.model.eval()
         transforms = val_loader.dataset.transform
@@ -226,9 +228,9 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = model(images)
+                features = model(images, self.is_tukey)
                 class_features[from_: from_+bsz] = features
-                features = model(torch.flip(images, dims=(3,)))
+                features = model(torch.flip(images, dims=(3,)), self.is_tukey)
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
@@ -237,7 +239,11 @@ class Appr(Inc_Learning_Appr):
             new_covs[c] = torch.cov(class_features.T)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
+            if self.adaptation_strategy == "full":
+                new_covs[c] = self.shrink_cov(new_covs[c], 1., 1.)
+
             print(f"Rank: {torch.linalg.matrix_rank(new_covs[c])}")
+
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError("Nan in covariance matrix")
 
@@ -265,8 +271,8 @@ class Appr(Inc_Learning_Appr):
                 images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 with torch.no_grad():
-                    target = self.model(images)
-                    old_features = self.old_model(images)
+                    target = self.model(images, self.is_tukey)
+                    old_features = self.old_model(images, self.is_tukey)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
@@ -280,8 +286,8 @@ class Appr(Inc_Learning_Appr):
                 for images, _ in val_loader:
                     bsz = images.shape[0]
                     images = images.to(self.device, non_blocking=True)
-                    target = self.model(images)
-                    old_features = self.old_model(images)
+                    target = self.model(images, self.is_tukey)
+                    old_features = self.old_model(images, self.is_tukey)
                     adapted_features = adapter(old_features)
                     loss = torch.nn.functional.mse_loss(adapted_features, target)
                     valid_loss.append(float(bsz * loss))
@@ -331,9 +337,9 @@ class Appr(Inc_Learning_Appr):
                     for images in loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
-                        features = self.model(images)
+                        features = self.model(images, self.is_tukey)
                         class_features[from_: from_+bsz] = features
-                        features = self.model(torch.flip(images, dims=(3,)))
+                        features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
                         class_features[from_+bsz: from_+2*bsz] = features
                         from_ += 2*bsz
 
@@ -365,7 +371,7 @@ class Appr(Inc_Learning_Appr):
         offset = self.task_offset[t]
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
-            features = self.model(images)
+            features = self.model(images, self.is_tukey)
             dist = torch.cdist(features, self.means)
             tag_preds = torch.argmin(dist, dim=1)
             taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
@@ -412,7 +418,7 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = self.model(images)
+                features = self.model(images, self.is_tukey)
                 class_features[from_: from_ + bsz] = features
                 from_ += bsz
 
@@ -427,3 +433,10 @@ class Appr(Inc_Learning_Appr):
         print(f"{self.sval_fraction} of eigenvalues sum is explained by:")
         for t, explained_by in enumerate(self.svals_explained_by):
             print(f"Task {t}: {explained_by}")
+
+    def shrink_cov(self, cov, alpha1, alpha2):
+        diag_mean = torch.mean(torch.diagonal(cov))
+        iden = torch.eye(cov.shape[0], device=self.device)
+        mask = iden == 0.0
+        off_diag_mean = torch.mean(cov[mask])
+        return cov + (alpha1*diag_mean*iden) + (alpha2*off_diag_mean*(1-iden))

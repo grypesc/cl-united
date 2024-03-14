@@ -186,11 +186,9 @@ class ResNet(nn.Module):
                                        dilate=replace_stride_with_dilation[2])
         if num_features is None:
             self.bottleneck = None
-            num_features = 512
         else:
             self.bottleneck = nn.Conv2d(512, num_features, 1, stride=1)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(num_features, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -234,7 +232,7 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, is_tukey=False):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -248,8 +246,9 @@ class ResNet(nn.Module):
             x = self.bottleneck(x)
         x = self.avgpool(x)
         features = torch.flatten(x, 1)
-        x = self.fc(features)
-        return x
+        if is_tukey:
+            features = torch.sqrt(features)
+        return features
 
 
 def _resnet(
