@@ -10,7 +10,6 @@ from torch.utils.data import Dataset
 from torchmetrics import Accuracy
 
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
-from .models.resnet32 import resnet8, resnet14, resnet20, resnet32
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.proxy_nca import ProxyNCA
@@ -38,11 +37,7 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
-        self.model = {"resnet8": resnet8(num_features=S),
-                      "resnet14": resnet14(num_features=S),
-                      "resnet18": resnet18(num_features=S, is_32=True),
-                      "resnet20": resnet20(num_features=S),
-                      "resnet32": resnet32(num_features=S)}[nnet]
+        self.model = resnet18(num_features=S, is_32=True, is_tukey=tukey)
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.means = torch.empty((0, self.S), device=self.device)

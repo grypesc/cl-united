@@ -151,6 +151,7 @@ class ResNet(nn.Module):
         zero_init_residual: bool = False,
         groups: int = 1,
         is_32=False,
+        is_tukey=False,
         width_per_group: int = 64,
         replace_stride_with_dilation: Optional[List[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None
@@ -189,6 +190,7 @@ class ResNet(nn.Module):
         else:
             self.bottleneck = nn.Conv2d(512, num_features, 1, stride=1)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.is_tukey = is_tukey
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -244,6 +246,8 @@ class ResNet(nn.Module):
         x = self.layer4(x)
         if self.bottleneck is not None:
             x = self.bottleneck(x)
+            if self.is_tukey:
+                x = nn.functional.relu(x)
         x = self.avgpool(x)
         features = torch.flatten(x, 1)
         if is_tukey:
