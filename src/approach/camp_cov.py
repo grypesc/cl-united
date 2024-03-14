@@ -239,8 +239,6 @@ class Appr(Inc_Learning_Appr):
             new_covs[c] = torch.cov(class_features.T)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
-            if self.adaptation_strategy == "full":
-                new_covs[c] = self.shrink_cov(new_covs[c], 1., 1.)
 
             print(f"Rank {c + self.task_offset[t]}: {torch.linalg.matrix_rank(new_covs[c])}")
 
@@ -304,7 +302,10 @@ class Appr(Inc_Learning_Appr):
 
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[0]):
-                    distribution = MultivariateNormal(self.means[c], self.covs[c])
+                    cov = self.covs[c].clone()
+                    if self.adaptation_strategy == "full":
+                        cov = self.shrink_cov(cov, 1., 1.)
+                    distribution = MultivariateNormal(self.means[c], cov)
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
                         raise RuntimeError(f"Nan in features sampled for class {c}")
@@ -349,8 +350,6 @@ class Appr(Inc_Learning_Appr):
                     gt_cov = torch.cov(class_features.T)
                     if self.adaptation_strategy == "diag":
                         gt_cov = torch.diag(torch.diag(gt_cov))
-                    if self.adaptation_strategy == "full":
-                        gt_cov = self.shrink_cov(gt_cov, 1., 1.)
 
                     # Calculate distance to old prototype
                     old_mean_diff.append((gt_mean - old_means[c]).norm())
