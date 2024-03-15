@@ -1,6 +1,7 @@
 import copy
 import random
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 from argparse import ArgumentParser
@@ -25,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", nnet="resnet18"):
+                 adaptation_strategy="mean-only", mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -42,6 +43,8 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders, self.val_data_loaders = [], []
         self.means = torch.empty((0, self.S), device=self.device)
         self.covs = torch.empty((0, self.S, self.S), device=self.device)
+        self.covs_inverted = None
+        self.is_mahalanobis = mahalanobis
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"proxy-yolo": ProxyYolo,
@@ -99,6 +102,10 @@ class Appr(Inc_Learning_Appr):
                             help='xxx',
                             action='store_true',
                             default=False)
+        parser.add_argument('--mahalanobis',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
@@ -123,6 +130,12 @@ class Appr(Inc_Learning_Appr):
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
+
+        covs = self.covs.clone()
+        for i in range(covs.shape[0]):
+            covs[i] = self.shrink_cov(covs[i])
+        covs = torch.inverse(covs)
+        self.covs_inverted = self.norm_cov(covs)
 
         print("Means norm statistics:")
         norms = torch.norm(self.means, dim=1)
@@ -391,7 +404,14 @@ class Appr(Inc_Learning_Appr):
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
             features = self.model(images, self.is_tukey)
-            dist = torch.cdist(features, self.means)
+            if self.is_mahalanobis:
+                diff = F.normalize(features.unsqueeze(1), p=2, dim=-1) - F.normalize(self.means.unsqueeze(0), p=2, dim=-1)
+                # diff = features.unsqueeze(1) - self.means.unsqueeze(0)
+                res = diff.unsqueeze(2) @ self.covs_inverted.unsqueeze(0)
+                res = res @ diff.unsqueeze(3)
+                dist = res.squeeze(2).squeeze(2)
+            else:  # Euclidean
+                dist = torch.cdist(features, self.means)
             tag_preds = torch.argmin(dist, dim=1)
             taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
 
@@ -435,7 +455,7 @@ class Appr(Inc_Learning_Appr):
             print(f"Task {t}: {explained_by}")
 
     @torch.no_grad()
-    def shrink_cov(self, cov, alpha1, alpha2):
+    def shrink_cov(self, cov, alpha1=1., alpha2=1.):
         diag_mean = torch.mean(torch.diagonal(cov))
         iden = torch.eye(cov.shape[0], device=self.device)
         mask = iden == 0.0
@@ -443,5 +463,8 @@ class Appr(Inc_Learning_Appr):
         return cov + (alpha1*diag_mean*iden) + (alpha2*off_diag_mean*(1-iden))
 
     @torch.no_grad()
-    def mahalanobis_dist(self, x, mean, cov):
-        pass
+    def norm_cov(self, cov):
+        diag = torch.diagonal(cov, dim1=1, dim2=2)
+        std = torch.sqrt(diag)
+        cov = cov / (std.unsqueeze(2) @ std.unsqueeze(1))
+        return cov
