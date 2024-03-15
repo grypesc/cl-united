@@ -156,7 +156,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
-                if epoch < int(self.nepochs * 0.1) and t > 0:
+                if epoch < int(self.nepochs * 0.01) and t > 0:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
                 with torch.no_grad():
@@ -203,7 +203,7 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader, num_classes_in_t):
-        """ Create distributions for task t"""
+        """ Creating distributions for task t"""
         self.model.eval()
         transforms = val_loader.dataset.transform
         model = self.model
@@ -229,7 +229,7 @@ class Appr(Inc_Learning_Appr):
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
-            # Calculate centroid
+            # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
             new_covs[c] = torch.cov(class_features.T)
             if self.adaptation_strategy == "diag":
@@ -318,8 +318,8 @@ class Appr(Inc_Learning_Appr):
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
                 old_mean_diff, new_mean_diff = [], []
                 old_cov_diff, new_cov_diff = [], []
-                class_images = np.concatenate([dl.dataset.images for dl in loaders])
-                labels = np.concatenate([dl.dataset.labels for dl in loaders])
+                class_images = np.concatenate([dl.dataset.images for dl in loaders[:-1]])
+                labels = np.concatenate([dl.dataset.labels for dl in loaders[:-1]])
 
                 for c in range(old_means.shape[0]):
                     train_indices = torch.tensor(labels) == c
@@ -331,7 +331,7 @@ class Appr(Inc_Learning_Appr):
                         ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
                     loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
                     from_ = 0
-                    class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+                    class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
                     for images in loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
