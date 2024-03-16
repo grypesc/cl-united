@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=3, S=64, distiller="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -54,6 +54,7 @@ class Appr(Inc_Learning_Appr):
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
+        self.adapter_type = adapter
 
     @staticmethod
     def extra_parser(args):
@@ -86,6 +87,11 @@ class Appr(Inc_Learning_Appr):
                             default="mean-only")
         parser.add_argument('--distiller',
                             help='Distiller',
+                            type=str,
+                            choices=["linear", "mlp"],
+                            default="linear")
+        parser.add_argument('--adapter',
+                            help='Adapter',
                             type=str,
                             choices=["linear", "mlp"],
                             default="linear")
@@ -260,10 +266,10 @@ class Appr(Inc_Learning_Appr):
         # Train the adapter
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
-        if self.distiller_type == "mlp":
-            adapter = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+        if self.adapter_type == "mlp":
+            adapter = nn.Sequential(nn.Linear(self.S, 8 * self.S),
                                     nn.GELU(),
-                                    nn.Linear(2 * self.S, self.S)
+                                    nn.Linear(8 * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
