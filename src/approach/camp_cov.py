@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -35,6 +35,7 @@ class Appr(Inc_Learning_Appr):
         self.K = K
         self.S = S
         self.alpha = alpha
+        self.tau = tau
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
@@ -47,9 +48,11 @@ class Appr(Inc_Learning_Appr):
         self.is_mahalanobis = mahalanobis
         self.task_offset = [0]
         self.classes_in_tasks = []
+        self.criterion_type = criterion
         self.criterion = {"proxy-yolo": ProxyYolo,
                           "proxy-nca": ProxyNCA,
                           "ce": CE}[criterion]
+        self.heads = []
         self.is_tukey = tukey
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
@@ -73,9 +76,13 @@ class Appr(Inc_Learning_Appr):
                             type=int,
                             default=64)
         parser.add_argument('--alpha',
-                            help='relative weight of kd loss',
+                            help='Weight of kd loss',
                             type=float,
                             default=10)
+        parser.add_argument('--tau',
+                            help='temperature',
+                            type=float,
+                            default=2)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -178,10 +185,11 @@ class Appr(Inc_Learning_Appr):
                 if epoch < int(self.nepochs * 0.01) and t > 0:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
-                with torch.no_grad():
-                    old_features = self.old_model(images) if t > 0 else None
 
-                total_loss, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                if type(criterion) is CE:
+                    total_loss, kd_loss = self.distill_logits(t, loss, features, images)
+                else:
+                    total_loss, kd_loss = self.distill_projected(t, loss, features, distiller, images)
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
@@ -201,9 +209,7 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
-                    old_features = self.old_model(images) if t > 0 else None
-
-                    _, kd_loss = self.distill_knowledge(loss, features, distiller, old_features)
+                    _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
@@ -219,6 +225,9 @@ class Appr(Inc_Learning_Appr):
 
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
+
+        if type(criterion) is CE:
+            self.heads.append(criterion.head)
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader, num_classes_in_t):
@@ -380,10 +389,25 @@ class Appr(Inc_Learning_Appr):
                 print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
                 print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
 
-    def distill_knowledge(self, loss, features, distiller, old_features=None):
-        if old_features is None:
+    def distill_projected(self, t, loss, features, distiller, images):
+        """ Projected distillation through the distiller"""
+        if t == 0:
             return loss, 0
-        kd_loss = nn.functional.mse_loss(distiller(features), old_features)
+        with torch.no_grad():
+            old_features = self.old_model(images)
+        kd_loss = self.cross_entropy(distiller(features), old_features, exp=1 / self.tau)
+        total_loss = loss + self.alpha * kd_loss
+        return total_loss, kd_loss
+
+    def distill_logits(self, t, loss, features, images):
+        """ Projected distillation through the distiller"""
+        if t == 0:
+            return loss, 0
+        with torch.no_grad():
+            old_features = self.old_model(images)
+            old_logits = torch.cat([head(old_features) for head in self.heads])
+            new_logits = torch.cat([head(features) for head in self.heads])
+        kd_loss = self.cross_entropy(new_logits, old_logits, exp=1 / self.tau)
         total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
@@ -474,3 +498,19 @@ class Appr(Inc_Learning_Appr):
         std = torch.sqrt(diag)
         cov = cov / (std.unsqueeze(2) @ std.unsqueeze(1))
         return cov
+
+    def cross_entropy(self, outputs, targets, exp=1.0, size_average=True, eps=1e-5):
+        """Calculates cross-entropy with temperature scaling"""
+        out = torch.nn.functional.softmax(outputs, dim=1)
+        tar = torch.nn.functional.softmax(targets, dim=1)
+        if exp != 1:
+            out = out.pow(exp)
+            out = out / out.sum(1).view(-1, 1).expand_as(out)
+            tar = tar.pow(exp)
+            tar = tar / tar.sum(1).view(-1, 1).expand_as(tar)
+        out = out + eps / out.size(1)
+        out = out / out.sum(1).view(-1, 1).expand_as(out)
+        ce = -(tar * out.log()).sum(1)
+        if size_average:
+            ce = ce.mean()
+        return ce
