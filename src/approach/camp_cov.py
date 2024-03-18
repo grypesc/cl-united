@@ -345,7 +345,7 @@ class Appr(Inc_Learning_Appr):
             print("")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
                 old_mean_diff, new_mean_diff = [], []
-                old_cov_diff, new_cov_diff = [], []
+                old_cov_diff, old_cov_norm_diff, new_cov_diff, new_cov_norm_diff = [], [], [], []
                 class_images = np.concatenate([dl.dataset.images for dl in loaders[-2:-1]])
                 labels = np.concatenate([dl.dataset.labels for dl in loaders[-2:-1]])
 
@@ -377,17 +377,24 @@ class Appr(Inc_Learning_Appr):
                     # Calculate distance to old prototype
                     old_mean_diff.append((gt_mean - old_means[c]).norm())
                     old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
+                    old_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(old_covs[c].unsqueeze(0))))
+
                     new_mean_diff.append((gt_mean - self.means[c]).norm())
                     new_cov_diff.append(torch.norm(gt_cov - self.covs[c]))
+                    new_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.covs[c].unsqueeze(0))))
 
                 old_mean_diff = torch.stack(old_mean_diff)
                 new_mean_diff = torch.stack(new_mean_diff)
                 old_cov_diff = torch.stack(old_cov_diff)
+                old_cov_norm_diff = torch.stack(old_cov_norm_diff)
                 new_cov_diff = torch.stack(new_cov_diff)
+                new_cov_norm_diff = torch.stack(new_cov_norm_diff)
                 print(f"Old {subset} mean diff: {old_mean_diff.mean():.2f} ± {old_mean_diff.std():.2f}")
                 print(f"New {subset} mean diff: {new_mean_diff.mean():.2f} ± {new_mean_diff.std():.2f}")
                 print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
                 print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
+                print(f"Old {subset} norm-cov diff: {old_cov_norm_diff.mean():.2f} ± {old_cov_norm_diff.std():.2f}")
+                print(f"New {subset} norm-cov diff: {new_cov_norm_diff.mean():.2f} ± {new_cov_norm_diff.std():.2f}")
 
     def distill_projected(self, t, loss, features, distiller, images):
         """ Projected distillation through the distiller"""
@@ -395,7 +402,7 @@ class Appr(Inc_Learning_Appr):
             return loss, 0
         with torch.no_grad():
             old_features = self.old_model(images)
-        kd_loss = self.cross_entropy(distiller(features), old_features, exp=1 / self.tau)
+        kd_loss = F.mse_loss(distiller(features), old_features)
         total_loss = loss + self.alpha * kd_loss
         return total_loss, kd_loss
 
