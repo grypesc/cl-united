@@ -153,9 +153,9 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
-            distiller = nn.Sequential(nn.Linear(self.S, 2 * self.S),
+            distiller = nn.Sequential(nn.Linear(self.S, 8 * self.S),
                                       nn.GELU(),
-                                      nn.Linear(2 * self.S, self.S)
+                                      nn.Linear(8 * self.S, self.S)
                                       )
 
         distiller.to(self.device, non_blocking=True)
@@ -337,10 +337,10 @@ class Appr(Inc_Learning_Appr):
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
                 old_mean_diff, new_mean_diff = [], []
                 old_cov_diff, new_cov_diff = [], []
-                class_images = np.concatenate([dl.dataset.images for dl in loaders[:-1]])
-                labels = np.concatenate([dl.dataset.labels for dl in loaders[:-1]])
+                class_images = np.concatenate([dl.dataset.images for dl in loaders[-2:-1]])
+                labels = np.concatenate([dl.dataset.labels for dl in loaders[-2:-1]])
 
-                for c in range(old_means.shape[0]):
+                for c in list(np.unique(labels)):
                     train_indices = torch.tensor(labels) == c
 
                     if isinstance(trn_loader.dataset.images, list):
