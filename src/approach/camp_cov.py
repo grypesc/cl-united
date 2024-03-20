@@ -26,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", shrink1=1, shrink2=1, mahalanobis=False, nnet="resnet18"):
+                 adaptation_strategy="mean-only", shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -36,6 +36,7 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.alpha = alpha
         self.tau = tau
+        self.multiplier = multiplier
         self.shrink1, self.shrink2 = shrink1, shrink2
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
@@ -80,6 +81,10 @@ class Appr(Inc_Learning_Appr):
                             help='Weight of kd loss',
                             type=float,
                             default=10)
+        parser.add_argument('--multiplier',
+                            help='mlp muliplier',
+                            type=int,
+                            default=8)
         parser.add_argument('--tau',
                             help='temperature',
                             type=float,
@@ -174,9 +179,9 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
-            distiller = nn.Sequential(nn.Linear(self.S, 8 * self.S),
+            distiller = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
                                       nn.GELU(),
-                                      nn.Linear(8 * self.S, self.S)
+                                      nn.Linear(self.multiplier * self.S, self.S)
                                       )
 
         distiller.to(self.device, non_blocking=True)
@@ -290,9 +295,9 @@ class Appr(Inc_Learning_Appr):
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.adapter_type == "mlp":
-            adapter = nn.Sequential(nn.Linear(self.S, 8 * self.S),
+            adapter = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
                                     nn.GELU(),
-                                    nn.Linear(8 * self.S, self.S)
+                                    nn.Linear(self.multiplier * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
@@ -441,7 +446,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(30, 60, 90)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
