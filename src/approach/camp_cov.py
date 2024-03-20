@@ -26,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", mahalanobis=False, nnet="resnet18"):
+                 adaptation_strategy="mean-only", shrink1=1, shrink2=1, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -36,6 +36,7 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.alpha = alpha
         self.tau = tau
+        self.shrink1, self.shrink2 = shrink1, shrink2
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
@@ -83,6 +84,14 @@ class Appr(Inc_Learning_Appr):
                             help='temperature',
                             type=float,
                             default=2)
+        parser.add_argument('--shrink1',
+                            help='Weight of kd loss',
+                            type=float,
+                            default=1)
+        parser.add_argument('--shrink2',
+                            help='Weight of kd loss',
+                            type=float,
+                            default=1)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -146,14 +155,19 @@ class Appr(Inc_Learning_Appr):
 
         covs = self.covs.clone()
         for i in range(covs.shape[0]):
-            covs[i] = self.shrink_cov(covs[i])
+            covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
         covs = torch.inverse(covs)
         self.covs_inverted = self.norm_cov(covs)
 
-        print("Means norm statistics:")
-        norms = torch.norm(self.means, dim=1)
-        print(f"Mean: {norms.mean():.2f}, median: {norms.median():.2f}")
-        print(f"Range: [{norms.min():.2f}; {norms.max():.2f}]")
+        print("Mean/cov statistics per task:")
+        mean_norms, cov_norms = [], []
+        for task in range(len(self.task_offset[1:])):
+            from_ = self.task_offset[task]
+            to_ = self.task_offset[task + 1]
+            mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
+            cov_norms.append(round(float(torch.norm(self.covs[from_:to_], dim=[1, 2]).mean()), 2))
+        print(f"Means: {mean_norms}")
+        print(f"Covs: {cov_norms}")
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
@@ -327,7 +341,7 @@ class Appr(Inc_Learning_Appr):
                 for c in range(self.means.shape[0]):
                     cov = self.covs[c].clone()
                     if self.adaptation_strategy == "full":
-                        cov = self.shrink_cov(cov, 1., 1.)
+                        cov = self.shrink_cov(cov, self.shrink1, self.shrink2)
                     distribution = MultivariateNormal(self.means[c], cov)
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
