@@ -512,6 +512,8 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def shrink_cov(self, cov, alpha1=1., alpha2=1.):
+        if alpha2 == -1.:
+            return cov + alpha1 * torch.eye(cov.shape[0], device=self.device)  # ordinary epsilon
         diag_mean = torch.mean(torch.diagonal(cov))
         iden = torch.eye(cov.shape[0], device=self.device)
         mask = iden == 0.0
