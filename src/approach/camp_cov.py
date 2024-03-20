@@ -26,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
+                 adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -48,6 +48,7 @@ class Appr(Inc_Learning_Appr):
         self.covs = torch.empty((0, self.S, self.S), device=self.device)
         self.covs_inverted = None
         self.is_mahalanobis = mahalanobis
+        self.is_normalization = normalize
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion_type = criterion
@@ -67,7 +68,7 @@ class Appr(Inc_Learning_Appr):
         parser = ArgumentParser()
         parser.add_argument('--N',
                             help='Number of samples to adapt cov',
-                            type=float,
+                            type=int,
                             default=10000)
         parser.add_argument('--K',
                             help='number of learners sampled for task',
@@ -133,6 +134,10 @@ class Appr(Inc_Learning_Appr):
                             help='xxx',
                             action='store_true',
                             default=False)
+        parser.add_argument('--normalize',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
@@ -161,8 +166,9 @@ class Appr(Inc_Learning_Appr):
         covs = self.covs.clone()
         for i in range(covs.shape[0]):
             covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
-        covs = torch.inverse(covs)
-        self.covs_inverted = self.norm_cov(covs)
+        self.covs_inverted = torch.inverse(covs)
+        if self.is_normalization:
+            self.covs_inverted = self.norm_cov(covs)
 
         print("Mean/cov statistics per task:")
         mean_norms, cov_norms = [], []
@@ -461,8 +467,10 @@ class Appr(Inc_Learning_Appr):
             images = images.to(self.device, non_blocking=True)
             features = self.model(images, self.is_tukey)
             if self.is_mahalanobis:
-                diff = F.normalize(features.unsqueeze(1), p=2, dim=-1) - F.normalize(self.means.unsqueeze(0), p=2, dim=-1)
-                # diff = features.unsqueeze(1) - self.means.unsqueeze(0)
+                if self.is_normalization:
+                    diff = F.normalize(features.unsqueeze(1), p=2, dim=-1) - F.normalize(self.means.unsqueeze(0), p=2, dim=-1)
+                else:
+                    diff = features.unsqueeze(1) - self.means.unsqueeze(0)
                 res = diff.unsqueeze(2) @ self.covs_inverted.unsqueeze(0)
                 res = res @ diff.unsqueeze(3)
                 dist = res.squeeze(2).squeeze(2)
