@@ -1,8 +1,8 @@
 #!/bin/bash
 for SEED in 0
 do
-  for ALPHA in 30
+  for VAL in 10
   do
-    python src/main_incremental.py --approach camp_cov --batch-size 128 --num-workers 4 --nepochs 200 --datasets cifar100_icarl --num-tasks 5 --nc-first-task 20 --lr 0.1 --weight-decay 5e-4 --adaptation-strategy diag --S 64 --alpha $ALPHA --use-test-as-val --criterion proxy-yolo --seed $SEED --distiller linear --nnet resnet18 --exp-name v1/cov_alpha=${ALPHA}
+    CUDA_VISIBLE_DEVICES=0 python src/main_incremental.py --approach camp_cov --seed $SEED --batch-size 128 --num-workers 4 --nepochs 200 --datasets cifar100_icarl --num-tasks 5 --nc-first-task 20 --lr 0.1 --weight-decay 1e-3 --adaptation-strategy full --S 64 --alpha 10 --shrink1 1 --shrink2 1 --use-test-as-val --criterion proxy-yolo --distiller linear --adapter linear --nnet resnet18 --exp-name v1/cov_
   done
 done
