@@ -162,6 +162,7 @@ class Appr(Inc_Learning_Appr):
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
+        self.print_covs(trn_loader, val_loader)
 
         covs = self.covs.clone()
         for i in range(covs.shape[0]):
@@ -169,16 +170,6 @@ class Appr(Inc_Learning_Appr):
         self.covs_inverted = torch.inverse(covs)
         if self.is_normalization:
             self.covs_inverted = self.norm_cov(covs)
-
-        print("Mean/cov statistics per task:")
-        mean_norms, cov_norms = [], []
-        for task in range(len(self.task_offset[1:])):
-            from_ = self.task_offset[task]
-            to_ = self.task_offset[task + 1]
-            mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
-            cov_norms.append(round(float(torch.norm(self.covs[from_:to_], dim=[1, 2]).mean()), 2))
-        print(f"Means: {mean_norms}")
-        print(f"Covs: {cov_norms}")
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
@@ -359,12 +350,12 @@ class Appr(Inc_Learning_Appr):
                         raise RuntimeError(f"Nan in features sampled for class {c}")
                     adapted_samples = adapter(samples)
                     self.means[c] = adapted_samples.mean(0)
-                    print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
+                    # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
                     self.covs[c] = torch.cov(adapted_samples.T)
                     if self.adaptation_strategy == "diag":
                         self.covs[c] = torch.diag(torch.diag(self.covs[c]))
 
-                    print(f"Rank post-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
+                    # print(f"Rank post-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
 
             # Evaluation
             print("")
@@ -452,7 +443,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(30, 60, 90)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-4, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -514,7 +505,7 @@ class Appr(Inc_Learning_Appr):
 
     @torch.no_grad()
     def print_singular_values(self):
-        print(f"{self.sval_fraction} of eigenvalues sum is explained by:")
+        print(f"### {self.sval_fraction} of eigenvalues sum is explained by: ###")
         for t, explained_by in enumerate(self.svals_explained_by):
             print(f"Task {t}: {explained_by}")
 
@@ -550,3 +541,51 @@ class Appr(Inc_Learning_Appr):
         if size_average:
             ce = ce.mean()
         return ce
+
+    @torch.no_grad()
+    def print_covs(self, trn_loader, val_loader):
+        self.model.eval()
+        print("### Mean/cov statistics per task: ###")
+        for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
+            gt_means, gt_covs = [], []
+            class_images = np.concatenate([dl.dataset.images for dl in loaders])
+            labels = np.concatenate([dl.dataset.labels for dl in loaders])
+
+            for c in list(np.unique(labels)):
+                train_indices = torch.tensor(labels) == c
+
+                if isinstance(trn_loader.dataset.images, list):
+                    train_images = list(compress(trn_loader.dataset.images, train_indices))
+                    ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
+                else:
+                    ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+                from_ = 0
+                class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
+                for images in loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device, non_blocking=True)
+                    features = self.model(images, self.is_tukey)
+                    class_features[from_: from_ + bsz] = features
+                    features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
+                    class_features[from_ + bsz: from_ + 2 * bsz] = features
+                    from_ += 2 * bsz
+
+                gt_means.append(class_features.mean(0))
+                gt_covs.append(torch.cov(class_features.T))
+
+        gt_means = torch.stack(gt_means)
+        gt_covs = torch.stack(gt_covs)
+        mean_norms, cov_norms = [], []
+        gt_mean_norms, gt_cov_norms = [], []
+        for task in range(len(self.task_offset[1:])):
+            from_ = self.task_offset[task]
+            to_ = self.task_offset[task + 1]
+            mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
+            cov_norms.append(round(float(torch.norm(self.covs[from_:to_], dim=[1, 2]).mean()), 2))
+            gt_mean_norms.append(round(float(torch.norm(gt_means[from_:to_], dim=1).mean()), 2))
+            gt_cov_norms.append(round(float(torch.norm(gt_covs[from_:to_], dim=1).mean()), 2))
+        print(f"Means: {mean_norms}")
+        print(f"GT Means: {gt_mean_norms}")
+        print(f"Covs: {cov_norms}")
+        print(f"GT Covs: {gt_cov_norms}")
