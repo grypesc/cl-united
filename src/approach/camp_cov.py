@@ -250,7 +250,6 @@ class Appr(Inc_Learning_Appr):
         """ Creating distributions for task t"""
         self.model.eval()
         transforms = val_loader.dataset.transform
-        model = self.model
         new_means = torch.zeros((num_classes_in_t, self.S), device=self.device)
         new_covs = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
         for c in range(num_classes_in_t):
@@ -263,13 +262,13 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
             from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=-999999999.0, device=self.device)
+            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = model(images, self.is_tukey)
+                features = self.model(images, self.is_tukey)
                 class_features[from_: from_+bsz] = features
-                features = model(torch.flip(images, dims=(3,)), self.is_tukey)
+                features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
@@ -546,33 +545,32 @@ class Appr(Inc_Learning_Appr):
     def print_covs(self, trn_loader, val_loader):
         self.model.eval()
         print("### Mean/cov statistics per task: ###")
-        for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
-            gt_means, gt_covs = [], []
-            class_images = np.concatenate([dl.dataset.images for dl in loaders])
-            labels = np.concatenate([dl.dataset.labels for dl in loaders])
+        gt_means, gt_covs = [], []
+        class_images = np.concatenate([dl.dataset.images for dl in self.train_data_loaders])
+        labels = np.concatenate([dl.dataset.labels for dl in self.train_data_loaders])
 
-            for c in list(np.unique(labels)):
-                train_indices = torch.tensor(labels) == c
+        for c in list(np.unique(labels)):
+            train_indices = torch.tensor(labels) == c
 
-                if isinstance(trn_loader.dataset.images, list):
-                    train_images = list(compress(trn_loader.dataset.images, train_indices))
-                    ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
-                else:
-                    ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
-                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
-                from_ = 0
-                class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
-                for images in loader:
-                    bsz = images.shape[0]
-                    images = images.to(self.device, non_blocking=True)
-                    features = self.model(images, self.is_tukey)
-                    class_features[from_: from_ + bsz] = features
-                    features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
-                    class_features[from_ + bsz: from_ + 2 * bsz] = features
-                    from_ += 2 * bsz
+            if isinstance(trn_loader.dataset.images, list):
+                train_images = list(compress(trn_loader.dataset.images, train_indices))
+                ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
+            else:
+                ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
+            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+            from_ = 0
+            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
+            for images in loader:
+                bsz = images.shape[0]
+                images = images.to(self.device, non_blocking=True)
+                features = self.model(images, self.is_tukey)
+                class_features[from_: from_ + bsz] = features
+                features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
+                class_features[from_ + bsz: from_ + 2 * bsz] = features
+                from_ += 2 * bsz
 
-                gt_means.append(class_features.mean(0))
-                gt_covs.append(torch.cov(class_features.T))
+            gt_means.append(class_features.mean(0))
+            gt_covs.append(torch.cov(class_features.T))
 
         gt_means = torch.stack(gt_means)
         gt_covs = torch.stack(gt_covs)
@@ -584,7 +582,7 @@ class Appr(Inc_Learning_Appr):
             mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
             cov_norms.append(round(float(torch.norm(self.covs[from_:to_], dim=[1, 2]).mean()), 2))
             gt_mean_norms.append(round(float(torch.norm(gt_means[from_:to_], dim=1).mean()), 2))
-            gt_cov_norms.append(round(float(torch.norm(gt_covs[from_:to_], dim=1).mean()), 2))
+            gt_cov_norms.append(round(float(torch.norm(gt_covs[from_:to_], dim=[1, 2]).mean()), 2))
         print(f"Means: {mean_norms}")
         print(f"GT Means: {gt_mean_norms}")
         print(f"Covs: {cov_norms}")
