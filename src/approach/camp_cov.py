@@ -174,7 +174,7 @@ class Appr(Inc_Learning_Appr):
             covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
         self.covs_inverted = torch.inverse(covs)
         if self.is_normalization:
-            self.covs_inverted = self.norm_cov(covs)
+            self.covs_inverted = self.norm_cov(self.covs_inverted)
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
