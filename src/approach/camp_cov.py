@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=3, S=64, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=3, S=64, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -49,6 +49,7 @@ class Appr(Inc_Learning_Appr):
         self.covs_inverted = None
         self.is_mahalanobis = mahalanobis
         self.is_normalization = normalize
+        self.is_rotation = rotation
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion_type = criterion
@@ -138,6 +139,10 @@ class Appr(Inc_Learning_Appr):
                             help='xxx',
                             action='store_true',
                             default=False)
+        parser.add_argument('--rotation',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--nnet',
                             type=str,
                             choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
@@ -183,6 +188,8 @@ class Appr(Inc_Learning_Appr):
 
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
+        if t == 0 and self.is_rotation:
+            criterion = self.criterion(4*num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
@@ -193,6 +200,8 @@ class Appr(Inc_Learning_Appr):
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
+                if t == 0 and self.is_rotation:
+                    images, targets = compute_rotations(images, targets, num_classes_in_t)
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
@@ -220,6 +229,8 @@ class Appr(Inc_Learning_Appr):
             distiller.eval()
             with torch.no_grad():
                 for images, targets in val_loader:
+                    if t == 0 and self.is_rotation:
+                        images, targets = compute_rotations(images, targets, num_classes_in_t)
                     targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
@@ -587,3 +598,12 @@ class Appr(Inc_Learning_Appr):
         print(f"GT Means: {gt_mean_norms}")
         print(f"Covs: {cov_norms}")
         print(f"GT Covs: {gt_cov_norms}")
+
+
+def compute_rotations(images, targets, total_classes):
+    # compute self-rotation for the first task following PASS https://github.com/Impression2805/CVPR21_PASS
+    images_rot = torch.cat([torch.rot90(images, k, (2, 3)) for k in range(1, 4)])
+    images = torch.cat((images, images_rot))
+    target_rot = torch.cat([(targets + total_classes * k) for k in range(1, 4)])
+    targets = torch.cat((targets, target_rot))
+    return images, targets
