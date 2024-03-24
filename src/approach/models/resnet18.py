@@ -243,12 +243,8 @@ class ResNet(nn.Module):
         x = self.layer4(x)
         if self.bottleneck is not None:
             x = self.bottleneck(x)
-            if self.is_tukey:
-                x = nn.functional.relu(x)
         x = self.avgpool(x)
         features = torch.flatten(x, 1)
-        if is_tukey:
-            features = torch.sqrt(features)
         return features
 
 

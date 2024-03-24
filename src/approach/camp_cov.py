@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=3, S=64, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=3, S=64, save=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -34,6 +34,7 @@ class Appr(Inc_Learning_Appr):
         self.N = N
         self.K = K
         self.S = S
+        self.save = save
         self.alpha = alpha
         self.tau = tau
         self.multiplier = multiplier
@@ -139,6 +140,10 @@ class Appr(Inc_Learning_Appr):
                             help='xxx',
                             action='store_true',
                             default=False)
+        parser.add_argument('--save',
+                            help='xxx',
+                            action='store_true',
+                            default=False)
         parser.add_argument('--rotation',
                             help='xxx',
                             action='store_true',
@@ -162,7 +167,8 @@ class Appr(Inc_Learning_Appr):
         if t > 0 and self.adaptation_strategy != "no-adapt":
             print("### Adapting prototypes ###")
             self.adapt_distributions(t, trn_loader, val_loader)
-        # torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
+        if self.save:
+            torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
         self.check_singular_values(t, val_loader)
@@ -342,6 +348,9 @@ class Appr(Inc_Learning_Appr):
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
+
+        if self.save:
+            torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
 
         # Adapt
         with torch.no_grad():
