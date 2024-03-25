@@ -163,6 +163,8 @@ class Appr(Inc_Learning_Appr):
         self.old_model.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
+        # state_dict = torch.load(f"../ckpts/model_{t}.pth")
+        # self.model.load_state_dict(state_dict, strict=True)
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         if t > 0 and self.adaptation_strategy != "no-adapt":
             print("### Adapting prototypes ###")
@@ -291,11 +293,11 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = torch.cov(class_features.T)
+            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), 0.001, 0)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
 
-            print(f"Rank {c + self.task_offset[t]}: {torch.linalg.matrix_rank(new_covs[c])}")
+            # print(f"Rank {c + self.task_offset[t]}: {torch.linalg.matrix_rank(new_covs[c])}")
 
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
@@ -313,6 +315,8 @@ class Appr(Inc_Learning_Appr):
                                     nn.Linear(self.multiplier * self.S, self.S)
                                     )
         adapter.to(self.device, non_blocking=True)
+        # state_dict = torch.load(f"../ckpts/adapter_{t}.pth")
+        # adapter.load_state_dict(state_dict, strict=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         old_means = copy.deepcopy(self.means)
         old_covs = copy.deepcopy(self.covs)
@@ -361,8 +365,6 @@ class Appr(Inc_Learning_Appr):
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[0]):
                     cov = self.covs[c].clone()
-                    if self.adaptation_strategy == "full":
-                        cov = self.shrink_cov(cov, self.shrink1, self.shrink2)
                     distribution = MultivariateNormal(self.means[c], cov)
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
