@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=3, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", alpha=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=3, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -35,7 +35,7 @@ class Appr(Inc_Learning_Appr):
         self.K = K
         self.S = S
         self.dump = dump
-        self.alpha = alpha
+        self.lamb = lamb
         self.tau = tau
         self.multiplier = multiplier
         self.shrink1, self.shrink2 = shrink1, shrink2
@@ -57,7 +57,7 @@ class Appr(Inc_Learning_Appr):
         self.criterion = {"proxy-yolo": ProxyYolo,
                           "proxy-nca": ProxyNCA,
                           "ce": CE}[criterion]
-        self.heads = []
+        self.heads = torch.nn.ModuleList()
         self.is_tukey = tukey
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
@@ -80,7 +80,7 @@ class Appr(Inc_Learning_Appr):
                             help='latent space size',
                             type=int,
                             default=64)
-        parser.add_argument('--alpha',
+        parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
                             default=10)
@@ -198,7 +198,9 @@ class Appr(Inc_Learning_Appr):
         criterion = self.criterion(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         if t == 0 and self.is_rotation:
             criterion = self.criterion(4*num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
-        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
+        self.heads.eval()
+        old_heads = copy.deepcopy(self.heads)
+        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
         optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
 
         for epoch in range(self.nepochs):
@@ -220,7 +222,7 @@ class Appr(Inc_Learning_Appr):
                 loss, logits = criterion(features, targets)
 
                 if type(criterion) is CE:
-                    total_loss, kd_loss = self.distill_logits(t, loss, features, images)
+                    total_loss, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
                 else:
                     total_loss, kd_loss = self.distill_projected(t, loss, features, distiller, images)
                 total_loss.backward()
@@ -244,7 +246,10 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
-                    _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
+                    if type(criterion) is CE:
+                        _, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
+                    else:
+                        _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
@@ -440,19 +445,19 @@ class Appr(Inc_Learning_Appr):
         with torch.no_grad():
             old_features = self.old_model(images)
         kd_loss = F.mse_loss(distiller(features), old_features)
-        total_loss = loss + self.alpha * kd_loss
+        total_loss = loss + self.lamb * kd_loss
         return total_loss, kd_loss
 
-    def distill_logits(self, t, loss, features, images):
+    def distill_logits(self, t, loss, features, images, old_heads):
         """ Projected distillation through the distiller"""
         if t == 0:
             return loss, 0
         with torch.no_grad():
             old_features = self.old_model(images)
-            old_logits = torch.cat([head(old_features) for head in self.heads])
-            new_logits = torch.cat([head(features) for head in self.heads])
+            old_logits = torch.cat([head(old_features) for head in old_heads])
+        new_logits = torch.cat([head(features) for head in self.heads])
         kd_loss = self.cross_entropy(new_logits, old_logits, exp=1 / self.tau)
-        total_loss = loss + self.alpha * kd_loss
+        total_loss = loss + self.lamb * kd_loss
         return total_loss, kd_loss
 
     def get_optimizer(self, parameters, wd):
