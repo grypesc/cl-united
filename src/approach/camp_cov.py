@@ -24,7 +24,7 @@ class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
-                 momentum=0, wd=0, multi_softmax=False, tukey=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
+                 momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, K=3, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
@@ -42,7 +42,7 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
-        self.model = resnet18(num_features=S, is_32=True, is_tukey=tukey)
+        self.model = resnet18(num_features=S, is_32=True)
         self.model.to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
         self.means = torch.empty((0, self.S), device=self.device)
@@ -58,7 +58,6 @@ class Appr(Inc_Learning_Appr):
                           "proxy-nca": ProxyNCA,
                           "ce": CE}[criterion]
         self.heads = torch.nn.ModuleList()
-        self.is_tukey = tukey
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -128,10 +127,6 @@ class Appr(Inc_Learning_Appr):
                             help='label smoothing',
                             type=float,
                             default=0.0)
-        parser.add_argument('--tukey',
-                            help='xxx',
-                            action='store_true',
-                            default=False)
         parser.add_argument('--mahalanobis',
                             help='xxx',
                             action='store_true',
@@ -290,9 +285,9 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = self.model(images, self.is_tukey)
+                features = self.model(images)
                 class_features[from_: from_+bsz] = features
-                features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
+                features = self.model(torch.flip(images, dims=(3,)))
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
@@ -333,8 +328,8 @@ class Appr(Inc_Learning_Appr):
                 images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 with torch.no_grad():
-                    target = self.model(images, self.is_tukey)
-                    old_features = self.old_model(images, self.is_tukey)
+                    target = self.model(images)
+                    old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
@@ -348,8 +343,8 @@ class Appr(Inc_Learning_Appr):
                 for images, _ in val_loader:
                     bsz = images.shape[0]
                     images = images.to(self.device, non_blocking=True)
-                    target = self.model(images, self.is_tukey)
-                    old_features = self.old_model(images, self.is_tukey)
+                    target = self.model(images)
+                    old_features = self.old_model(images)
                     adapted_features = adapter(old_features)
                     loss = torch.nn.functional.mse_loss(adapted_features, target)
                     valid_loss.append(float(bsz * loss))
@@ -405,9 +400,9 @@ class Appr(Inc_Learning_Appr):
                     for images in loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
-                        features = self.model(images, self.is_tukey)
+                        features = self.model(images)
                         class_features[from_: from_+bsz] = features
-                        features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
+                        features = self.model(torch.flip(images, dims=(3,)))
                         class_features[from_+bsz: from_+2*bsz] = features
                         from_ += 2*bsz
 
@@ -482,7 +477,7 @@ class Appr(Inc_Learning_Appr):
         offset = self.task_offset[t]
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
-            features = self.model(images, self.is_tukey)
+            features = self.model(images)
             if self.is_mahalanobis:
                 if self.is_normalization:
                     diff = F.normalize(features.unsqueeze(1), p=2, dim=-1) - F.normalize(self.means.unsqueeze(0), p=2, dim=-1)
@@ -518,7 +513,7 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = self.model(images, self.is_tukey)
+                features = self.model(images)
                 class_features[from_: from_ + bsz] = features
                 from_ += bsz
 
@@ -590,9 +585,9 @@ class Appr(Inc_Learning_Appr):
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = self.model(images, self.is_tukey)
+                features = self.model(images)
                 class_features[from_: from_ + bsz] = features
-                features = self.model(torch.flip(images, dims=(3,)), self.is_tukey)
+                features = self.model(torch.flip(images, dims=(3,)))
                 class_features[from_ + bsz: from_ + 2 * bsz] = features
                 from_ += 2 * bsz
 
