@@ -168,16 +168,18 @@ class Appr(Inc_Learning_Appr):
             torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
-        self.check_singular_values(t, val_loader)
-        self.print_singular_values()
-        self.print_covs(trn_loader, val_loader)
 
+        # Calculate inverted covariances for evaluation with mahalanobis
         covs = self.covs.clone()
         for i in range(covs.shape[0]):
             covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
         if self.is_normalization:
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
+
+        self.check_singular_values(t, val_loader)
+        self.print_singular_values()
+        self.print_covs(trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
@@ -378,10 +380,10 @@ class Appr(Inc_Learning_Appr):
 
                     # print(f"Rank post-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
 
-            # Evaluation
-            print("")
+            print("### Adaptation evaluation ###")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
                 old_mean_diff, new_mean_diff = [], []
+                old_kld, new_kld = [], []
                 old_cov_diff, old_cov_norm_diff, new_cov_diff, new_cov_norm_diff = [], [], [], []
                 class_images = np.concatenate([dl.dataset.images for dl in loaders[-2:-1]])
                 labels = np.concatenate([dl.dataset.labels for dl in loaders[-2:-1]])
@@ -408,30 +410,41 @@ class Appr(Inc_Learning_Appr):
 
                     gt_mean = class_features.mean(0)
                     gt_cov = torch.cov(class_features.T)
+                    gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
                     if self.adaptation_strategy == "diag":
                         gt_cov = torch.diag(torch.diag(gt_cov))
 
-                    # Calculate distance to old prototype
+                    # Calculate old diffs
                     old_mean_diff.append((gt_mean - old_means[c]).norm())
                     old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
                     old_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(old_covs[c].unsqueeze(0))))
-
+                    old_gauss = torch.distributions.MultivariateNormal(old_means[c], old_covs[c])
+                    old_kld.append(torch.distributions.kl_divergence(old_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, old_gauss))
+                    # Calculate new diffs
                     new_mean_diff.append((gt_mean - self.means[c]).norm())
                     new_cov_diff.append(torch.norm(gt_cov - self.covs[c]))
                     new_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.covs[c].unsqueeze(0))))
+                    new_gauss = torch.distributions.MultivariateNormal(self.means[c], self.covs[c])
+                    new_kld.append(torch.distributions.kl_divergence(new_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, new_gauss))
 
                 old_mean_diff = torch.stack(old_mean_diff)
-                new_mean_diff = torch.stack(new_mean_diff)
                 old_cov_diff = torch.stack(old_cov_diff)
                 old_cov_norm_diff = torch.stack(old_cov_norm_diff)
+                old_kld = torch.stack(old_kld)
+
+                new_mean_diff = torch.stack(new_mean_diff)
                 new_cov_diff = torch.stack(new_cov_diff)
                 new_cov_norm_diff = torch.stack(new_cov_norm_diff)
+                new_kld = torch.stack(new_kld)
                 print(f"Old {subset} mean diff: {old_mean_diff.mean():.2f} ± {old_mean_diff.std():.2f}")
                 print(f"New {subset} mean diff: {new_mean_diff.mean():.2f} ± {new_mean_diff.std():.2f}")
                 print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
                 print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
                 print(f"Old {subset} norm-cov diff: {old_cov_norm_diff.mean():.2f} ± {old_cov_norm_diff.std():.2f}")
                 print(f"New {subset} norm-cov diff: {new_cov_norm_diff.mean():.2f} ± {new_cov_norm_diff.std():.2f}")
+                print(f"Old {subset} KLD: {old_kld.mean():.2f} ± {old_kld.std():.2f}")
+                print(f"New {subset} KLD: {new_kld.mean():.2f} ± {new_kld.std():.2f}")
+                print("")
 
     def distill_projected(self, t, loss, features, distiller, images):
         """ Projected distillation through the distiller"""
@@ -464,7 +477,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(30, 60, 90)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=1e-5, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=5e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -566,11 +579,12 @@ class Appr(Inc_Learning_Appr):
     @torch.no_grad()
     def print_covs(self, trn_loader, val_loader):
         self.model.eval()
-        print("### Mean/cov statistics per task: ###")
-        gt_means, gt_covs = [], []
+        print("### Norms per task: ###")
+        gt_means, gt_covs, gt_inverted_covs = [], [], []
         class_images = np.concatenate([dl.dataset.images for dl in self.train_data_loaders])
         labels = np.concatenate([dl.dataset.labels for dl in self.train_data_loaders])
 
+        # Calculate ground truth
         for c in list(np.unique(labels)):
             train_indices = torch.tensor(labels) == c
 
@@ -592,23 +606,33 @@ class Appr(Inc_Learning_Appr):
                 from_ += 2 * bsz
 
             gt_means.append(class_features.mean(0))
-            gt_covs.append(torch.cov(class_features.T))
+            cov = torch.cov(class_features.T)
+            gt_covs.append(cov)
+            gt_inverted_covs.append(torch.inverse(cov))
 
         gt_means = torch.stack(gt_means)
         gt_covs = torch.stack(gt_covs)
+        gt_inverted_covs = torch.stack(gt_inverted_covs)
+
+        # Calculate statistics per task
         mean_norms, cov_norms = [], []
         gt_mean_norms, gt_cov_norms = [], []
+        inverted_cov_norms, gt_inverted_cov_norms = [], []
         for task in range(len(self.task_offset[1:])):
             from_ = self.task_offset[task]
             to_ = self.task_offset[task + 1]
             mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
-            cov_norms.append(round(float(torch.norm(self.covs[from_:to_], dim=[1, 2]).mean()), 2))
+            cov_norms.append(round(float(torch.linalg.matrix_norm(self.covs[from_:to_]).mean()), 2))
+            inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(self.covs_inverted[from_:to_]).mean()), 2))
             gt_mean_norms.append(round(float(torch.norm(gt_means[from_:to_], dim=1).mean()), 2))
-            gt_cov_norms.append(round(float(torch.norm(gt_covs[from_:to_], dim=[1, 2]).mean()), 2))
+            gt_cov_norms.append(round(float(torch.linalg.matrix_norm(gt_covs[from_:to_]).mean()), 2))
+            gt_inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(gt_inverted_covs[from_:to_]).mean()), 2))
         print(f"Means: {mean_norms}")
         print(f"GT Means: {gt_mean_norms}")
         print(f"Covs: {cov_norms}")
         print(f"GT Covs: {gt_cov_norms}")
+        print(f"Inverted Covs: {gt_cov_norms}")
+        print(f"GT Inverted Covs: {gt_inverted_cov_norms}")
 
 
 def compute_rotations(images, targets, total_classes):
