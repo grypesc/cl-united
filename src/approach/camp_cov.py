@@ -295,7 +295,7 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), 0.001, 0)
+            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), 0.001)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
 
@@ -544,7 +544,7 @@ class Appr(Inc_Learning_Appr):
             print(f"Task {t}: {explained_by}")
 
     @torch.no_grad()
-    def shrink_cov(self, cov, alpha1=1., alpha2=1.):
+    def shrink_cov(self, cov, alpha1=1., alpha2=0.):
         if alpha2 == -1.:
             return cov + alpha1 * torch.eye(cov.shape[0], device=self.device)  # ordinary epsilon
         diag_mean = torch.mean(torch.diagonal(cov))
@@ -608,7 +608,7 @@ class Appr(Inc_Learning_Appr):
             gt_means.append(class_features.mean(0))
             cov = torch.cov(class_features.T)
             gt_covs.append(cov)
-            gt_inverted_covs.append(torch.inverse(cov))
+            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, 0.001)))
 
         gt_means = torch.stack(gt_means)
         gt_covs = torch.stack(gt_covs)
@@ -623,7 +623,7 @@ class Appr(Inc_Learning_Appr):
             to_ = self.task_offset[task + 1]
             mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
             cov_norms.append(round(float(torch.linalg.matrix_norm(self.covs[from_:to_]).mean()), 2))
-            inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(self.covs_inverted[from_:to_]).mean()), 2))
+            inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(torch.inverse(self.covs[from_:to_])).mean()), 2))  # no shrink, no norm!
             gt_mean_norms.append(round(float(torch.norm(gt_means[from_:to_], dim=1).mean()), 2))
             gt_cov_norms.append(round(float(torch.linalg.matrix_norm(gt_covs[from_:to_]).mean()), 2))
             gt_inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(gt_inverted_covs[from_:to_]).mean()), 2))
