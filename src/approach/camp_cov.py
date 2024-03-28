@@ -295,7 +295,7 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), 0.001)
+            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), 0.01)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
 
@@ -304,6 +304,7 @@ class Appr(Inc_Learning_Appr):
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
+        print(f"Cov matrix det: {torch.linalg.det(new_covs)}")
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
 
@@ -378,9 +379,10 @@ class Appr(Inc_Learning_Appr):
                     if self.adaptation_strategy == "diag":
                         self.covs[c] = torch.diag(torch.diag(self.covs[c]))
 
-                    # print(f"Rank post-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
+                    print(f"Rank post-adapt {c}: {torch.linalg.matrix_rank(self.covs[c], tol=0.001)}")
 
             print("### Adaptation evaluation ###")
+            print(f"Adapted cov matrix det: {torch.linalg.det(self.covs)}")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
                 old_mean_diff, new_mean_diff = [], []
                 old_kld, new_kld = [], []
@@ -608,7 +610,7 @@ class Appr(Inc_Learning_Appr):
             gt_means.append(class_features.mean(0))
             cov = torch.cov(class_features.T)
             gt_covs.append(cov)
-            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, 0.001)))
+            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, 0.01)))
 
         gt_means = torch.stack(gt_means)
         gt_covs = torch.stack(gt_covs)
@@ -631,7 +633,7 @@ class Appr(Inc_Learning_Appr):
         print(f"GT Means: {gt_mean_norms}")
         print(f"Covs: {cov_norms}")
         print(f"GT Covs: {gt_cov_norms}")
-        print(f"Inverted Covs: {gt_cov_norms}")
+        print(f"Inverted Covs: {inverted_cov_norms}")
         print(f"GT Inverted Covs: {gt_inverted_cov_norms}")
 
 
