@@ -202,7 +202,7 @@ class Appr(Inc_Learning_Appr):
         self.heads.eval()
         old_heads = copy.deepcopy(self.heads)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, self.wd)
+        optimizer, lr_scheduler = self.get_optimizer(parameters, t, self.wd)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -474,9 +474,9 @@ class Appr(Inc_Learning_Appr):
         total_loss = loss + self.lamb * kd_loss
         return total_loss, kd_loss
 
-    def get_optimizer(self, parameters, wd):
+    def get_optimizer(self, parameters, t, wd):
         """Returns the optimizer"""
-        milestones = (int(0.4*self.nepochs), int(0.8*self.nepochs))
+        milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
