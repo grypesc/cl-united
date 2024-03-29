@@ -207,9 +207,12 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         trn_transform_list = [
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(brightness=63 / 255),
-            CIFAR10Policy(),
+            transforms.ToTensor(),
+            # transforms.ColorJitter(brightness=63 / 255),
+            # CIFAR10Policy(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
         ]
+        tst_transform_list = [transforms.ToTensor(), transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))]
     elif "tinyimagenet200" in ds_name.lower():
         trn_transform_list = [
             transforms.RandomCrop(32, padding=4),
@@ -226,13 +229,13 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         ]
       
     # to tensor
-    trn_transform_list.append(transforms.ToTensor())
-    tst_transform_list.append(transforms.ToTensor())
+    # trn_transform_list.append(transforms.ToTensor())
+    # tst_transform_list.append(transforms.ToTensor())
    
     # normalization
-    if normalize is not None:
-        trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
-        tst_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
+    # if normalize is not None:
+    #     trn_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
+    #     tst_transform_list.append(transforms.Normalize(mean=normalize[0], std=normalize[1]))
 
     # gray to rgb
     if extend_channel is not None:
