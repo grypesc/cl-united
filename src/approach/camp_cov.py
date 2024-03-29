@@ -492,15 +492,15 @@ class Appr(Inc_Learning_Appr):
             return loss, 0
         with torch.no_grad():
             old_features = self.old_model(images)
-            old_logits = torch.cat([head(old_features) for head in old_heads])
-        new_logits = torch.cat([head(features) for head in self.heads])
+            old_logits = torch.cat([head(old_features) for head in old_heads], dim=1)
+        new_logits = torch.cat([head(features) for head in self.heads], dim=1)
         kd_loss = self.cross_entropy(new_logits, old_logits, exp=1 / self.tau)
         total_loss = loss + self.lamb * kd_loss
         return total_loss, kd_loss
 
     def get_optimizer(self, parameters, t, wd):
         """Returns the optimizer"""
-        milestones = (int(0.4*self.nepochs), int(0.8*self.nepochs))
+        milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
         optimizer = torch.optim.SGD(parameters, lr=self.lr if t == 0 else 0.1*self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
