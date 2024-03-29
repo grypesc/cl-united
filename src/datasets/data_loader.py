@@ -214,19 +214,33 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         ]
         tst_transform_list = [transforms.ToTensor(), transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))]
     elif "tinyimagenet200" in ds_name.lower():
-        trn_transform_list = [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
+        trn_transform_list = transforms.Compose(
+            [transforms.RandomCrop(64, padding=8),
+             transforms.RandomHorizontalFlip(),
+             transforms.ToTensor(),
+             transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                  std=[0.229, 0.224, 0.225])
+             ])
+
+        tst_transform_list = transforms.Compose([
             transforms.ToTensor(),
-            transforms.ToPILImage()
-        ]
-    elif "imagenet100" in ds_name.lower():
-        trn_transform_list = [
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])])
+    elif "imagenet" in ds_name.lower():
+        trn_transform_list = transforms.Compose([
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])
+                    ])
+        tst_transform_list = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.ToPILImage()
-        ]
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+            ])
       
     # to tensor
     # trn_transform_list.append(transforms.ToTensor())
