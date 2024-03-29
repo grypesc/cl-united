@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -39,6 +39,7 @@ class Appr(Inc_Learning_Appr):
         self.tau = tau
         self.multiplier = multiplier
         self.shrink1, self.shrink2 = shrink1, shrink2
+        self.default_shrink = 0.01
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
@@ -61,6 +62,7 @@ class Appr(Inc_Learning_Appr):
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
+        self.distillation = distillation
         self.adapter_type = adapter
 
     @staticmethod
@@ -112,7 +114,7 @@ class Appr(Inc_Learning_Appr):
                             help='Distiller',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="linear")
+                            default="mlp")
         parser.add_argument('--adapter',
                             help='Adapter',
                             type=str,
@@ -123,6 +125,11 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["ce", "proxy-nca", "proxy-yolo"],
                             default="proxy-yolo")
+        parser.add_argument('--distillation',
+                            help='Loss function',
+                            type=str,
+                            choices=["projected", "logit", "feature"],
+                            default="projected")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -222,10 +229,13 @@ class Appr(Inc_Learning_Appr):
                     features = features.detach()
                 loss, logits = criterion(features, targets)
 
-                if type(criterion) is CE:
+                if self.distillation == "logit":
                     total_loss, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
-                else:
+                elif self.distillation == "projected":
                     total_loss, kd_loss = self.distill_projected(t, loss, features, distiller, images)
+                else:  # feature
+                    total_loss, kd_loss = self.distill_features(t, loss, features, images)
+
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
@@ -247,10 +257,13 @@ class Appr(Inc_Learning_Appr):
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                     features = self.model(images)
                     loss, logits = criterion(features, targets)
-                    if type(criterion) is CE:
+                    if self.distillation == "logit":
                         _, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
-                    else:
+                    elif self.distillation == "projected":
                         _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
+                    else:  # feature
+                        _, kd_loss = self.distill_features(t, loss, features, images)
+
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                     valid_loss.append(float(bsz * loss))
@@ -267,7 +280,7 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
-        if type(criterion) is CE:
+        if self.distillation == "logit":
             self.heads.append(criterion.head)
 
     @torch.no_grad()
@@ -299,7 +312,7 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), 0.01)
+            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.default_shrink)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
 
@@ -416,7 +429,7 @@ class Appr(Inc_Learning_Appr):
 
                     gt_mean = class_features.mean(0)
                     gt_cov = torch.cov(class_features.T)
-                    gt_cov = self.shrink_cov(gt_cov, 0.01)
+                    gt_cov = self.shrink_cov(gt_cov, self.default_shrink)
                     gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
                     if self.adaptation_strategy == "diag":
                         gt_cov = torch.diag(torch.diag(gt_cov))
@@ -463,6 +476,16 @@ class Appr(Inc_Learning_Appr):
         total_loss = loss + self.lamb * kd_loss
         return total_loss, kd_loss
 
+    def distill_features(self, t, loss, features, images):
+        """ Projected distillation through the distiller"""
+        if t == 0:
+            return loss, 0
+        with torch.no_grad():
+            old_features = self.old_model(images)
+        kd_loss = F.mse_loss(features, old_features)
+        total_loss = loss + self.lamb * kd_loss
+        return total_loss, kd_loss
+
     def distill_logits(self, t, loss, features, images, old_heads):
         """ Projected distillation through the distiller"""
         if t == 0:
@@ -477,8 +500,8 @@ class Appr(Inc_Learning_Appr):
 
     def get_optimizer(self, parameters, t, wd):
         """Returns the optimizer"""
-        milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
-        optimizer = torch.optim.SGD(parameters, lr=self.lr, weight_decay=wd, momentum=0.9)
+        milestones = (int(0.4*self.nepochs), int(0.8*self.nepochs))
+        optimizer = torch.optim.SGD(parameters, lr=self.lr if t == 0 else 0.1*self.lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
@@ -615,7 +638,7 @@ class Appr(Inc_Learning_Appr):
             gt_means.append(class_features.mean(0))
             cov = torch.cov(class_features.T)
             gt_covs.append(cov)
-            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, 0.01)))
+            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, self.default_shrink)))
 
         gt_means = torch.stack(gt_means)
         gt_covs = torch.stack(gt_covs)
