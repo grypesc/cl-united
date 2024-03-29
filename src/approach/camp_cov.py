@@ -416,6 +416,7 @@ class Appr(Inc_Learning_Appr):
 
                     gt_mean = class_features.mean(0)
                     gt_cov = torch.cov(class_features.T)
+                    gt_cov = self.shrink_cov(gt_cov, 0.01)
                     gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
                     if self.adaptation_strategy == "diag":
                         gt_cov = torch.diag(torch.diag(gt_cov))
