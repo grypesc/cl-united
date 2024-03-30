@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, alpha=0.01, distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -36,6 +36,7 @@ class Appr(Inc_Learning_Appr):
         self.S = S
         self.dump = dump
         self.lamb = lamb
+        self.alpha = alpha
         self.tau = tau
         self.multiplier = multiplier
         self.shrink1, self.shrink2 = shrink1, shrink2
@@ -81,6 +82,10 @@ class Appr(Inc_Learning_Appr):
                             help='latent space size',
                             type=int,
                             default=64)
+        parser.add_argument('--alpha',
+                            help='Weight of pizdolos loss',
+                            type=float,
+                            default=0.01)
         parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
@@ -213,6 +218,7 @@ class Appr(Inc_Learning_Appr):
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
+            train_pizdolos = []
             train_hits, val_hits = 0, 0
             self.model.train()
             criterion.train()
@@ -236,12 +242,15 @@ class Appr(Inc_Learning_Appr):
                 else:  # feature
                     total_loss, kd_loss = self.distill_features(t, loss, features, images)
 
+                pizdolos = loss_pizdolos(features)
+                total_loss += self.alpha * pizdolos
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
+                train_pizdolos.append(float(pizdolos))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
@@ -273,11 +282,11 @@ class Appr(Inc_Learning_Appr):
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-
+            train_pizdolos = sum(train_pizdolos) / len(train_pizdolos)
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Pizdo: {train_pizdolos:.3f}"
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
         if self.distillation == "logit":
@@ -672,3 +681,10 @@ def compute_rotations(images, targets, total_classes):
     target_rot = torch.cat([(targets + total_classes * k) for k in range(1, 4)])
     targets = torch.cat((targets, target_rot))
     return images, targets
+
+def loss_pizdolos(features):
+    # Idea 1 - determinant
+    cov = torch.cov(features.T)
+    det = torch.det(cov)
+    loss = -torch.log(torch.abs(det) + 1e-6)
+    return loss
