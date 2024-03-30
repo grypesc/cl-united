@@ -85,7 +85,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='Weight of pizdolos loss',
                             type=float,
-                            default=0.01)
+                            default=1e-4)
         parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
@@ -182,12 +182,14 @@ class Appr(Inc_Learning_Appr):
             self.adapt_distributions(t, trn_loader, val_loader)
         if self.dump:
             torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        print("### Creating new prototypes ###")
+        print("### Creating new prototypes ###\n")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
 
         # Calculate inverted covariances for evaluation with mahalanobis
         covs = self.covs.clone()
+        print(f"Cov matrix det: {torch.linalg.det(covs)}")
         for i in range(covs.shape[0]):
+            print(f"Rank for class {i}: {torch.linalg.matrix_rank(covs[i], tol=0.001)}")
             covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
         if self.is_normalization:
             covs = self.norm_cov(covs)
@@ -286,7 +288,7 @@ class Appr(Inc_Learning_Appr):
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Pizdo: {train_pizdolos:.3f}"
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_pizdolos:.3f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
         if self.distillation == "logit":
@@ -330,7 +332,6 @@ class Appr(Inc_Learning_Appr):
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
-        print(f"Cov matrix det: {torch.linalg.det(new_covs)}")
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
 
@@ -405,10 +406,7 @@ class Appr(Inc_Learning_Appr):
                     if self.adaptation_strategy == "diag":
                         self.covs[c] = torch.diag(torch.diag(self.covs[c]))
 
-                    print(f"Rank post-adapt {c}: {torch.linalg.matrix_rank(self.covs[c], tol=0.001)}")
-
             print("### Adaptation evaluation ###")
-            print(f"Adapted cov matrix det: {torch.linalg.det(self.covs)}")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
                 old_mean_diff, new_mean_diff = [], []
                 old_kld, new_kld = [], []
@@ -682,9 +680,10 @@ def compute_rotations(images, targets, total_classes):
     targets = torch.cat((targets, target_rot))
     return images, targets
 
+
 def loss_pizdolos(features):
     # Idea 1 - determinant
     cov = torch.cov(features.T)
     det = torch.det(cov)
-    loss = -torch.log(torch.clamp(torch.abs(det), max=10))
+    loss = - torch.log(torch.clamp(torch.abs(det), max=1))
     return loss
