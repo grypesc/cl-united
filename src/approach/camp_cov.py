@@ -686,5 +686,5 @@ def loss_pizdolos(features):
     # Idea 1 - determinant
     cov = torch.cov(features.T)
     det = torch.det(cov)
-    loss = -torch.log(torch.abs(det) + 1e-6)
+    loss = -torch.log(torch.clamp(torch.abs(det), max=10))
     return loss
