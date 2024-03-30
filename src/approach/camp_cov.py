@@ -200,6 +200,8 @@ class Appr(Inc_Learning_Appr):
         self.print_covs(trn_loader, val_loader)
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
+        trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
+        val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
@@ -213,8 +215,8 @@ class Appr(Inc_Learning_Appr):
         criterion = self.criterion(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         if t == 0 and self.is_rotation:
             criterion = self.criterion(4*num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
-            trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size // 4, num_workers=trn_loader.num_workers, shuffle=True)
-            val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size // 4, num_workers=val_loader.num_workers, shuffle=False)
+            trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size // 4, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
+            val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size // 4, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         self.heads.eval()
         old_heads = copy.deepcopy(self.heads)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
@@ -687,5 +689,5 @@ def loss_singularity(features):
     # Idea 1 - determinant
     cov = torch.cov(features.T)
     det = torch.det(cov)
-    loss = - torch.log(torch.clamp(torch.abs(det), min=1e-24, max=1))
+    loss = - torch.log(torch.clamp(torch.abs(det), max=1))
     return loss
