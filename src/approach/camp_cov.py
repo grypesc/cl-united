@@ -249,7 +249,8 @@ class Appr(Inc_Learning_Appr):
                     total_loss, kd_loss = self.distill_features(t, loss, features, images)
 
                 singularity = loss_singularity(features)
-                total_loss += self.alpha * singularity
+                if self.alpha > 0:
+                    total_loss += self.alpha * singularity
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
