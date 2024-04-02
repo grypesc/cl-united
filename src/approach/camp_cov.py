@@ -358,6 +358,7 @@ class Appr(Inc_Learning_Appr):
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
+            train_singularity = []
             for images, _ in trn_loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
@@ -367,10 +368,13 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
+                singularity = loss_singularity(adapted_features)
+                loss += self.alpha * singularity
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
+                train_singularity.append(float(bsz * singularity))
             lr_scheduler.step()
 
             adapter.eval()
@@ -385,8 +389,9 @@ class Appr(Inc_Learning_Appr):
                     valid_loss.append(float(bsz * loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
+            train_singularity = sum(train_singularity) / len(trn_loader.dataset)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} ")
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_singularity:.3f}")
 
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
@@ -691,4 +696,6 @@ def loss_singularity(features):
     cov = torch.cov(features.T)
     det = torch.det(cov)
     loss = - torch.log(torch.clamp(torch.abs(det), max=10))
+    if bool(torch.isinf(loss)):
+        return 2137.
     return loss
