@@ -177,19 +177,19 @@ class Appr(Inc_Learning_Appr):
         # state_dict = torch.load(f"../ckpts/model_{t}.pth")
         # self.model.load_state_dict(state_dict, strict=True)
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
+        if self.dump:
+            torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         if t > 0 and self.adaptation_strategy != "no-adapt":
             print("### Adapting prototypes ###")
             self.adapt_distributions(t, trn_loader, val_loader)
-        if self.dump:
-            torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         print("### Creating new prototypes ###\n")
-        self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
+        covs_not_shrinked = self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
 
         # Calculate inverted covariances for evaluation with mahalanobis
         covs = self.covs.clone()
         print(f"Cov matrix det: {torch.linalg.det(covs)}")
         for i in range(covs.shape[0]):
-            print(f"Rank for class {i}: {torch.linalg.matrix_rank(covs[i], tol=0.001)}")
+            print(f"Rank for class {i}: {torch.linalg.matrix_rank(covs_not_shrinked[i], tol=0.001)}")
             covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
         if self.is_normalization:
             covs = self.norm_cov(covs)
@@ -306,6 +306,7 @@ class Appr(Inc_Learning_Appr):
         transforms = val_loader.dataset.transform
         new_means = torch.zeros((num_classes_in_t, self.S), device=self.device)
         new_covs = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
+        new_covs_not_shrinked = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
         for c in range(num_classes_in_t):
             train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
             if isinstance(trn_loader.dataset.images, list):
@@ -329,16 +330,18 @@ class Appr(Inc_Learning_Appr):
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
             new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.default_shrink)
+            new_covs_not_shrinked[c] = torch.cov(class_features.T)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
-
-            # print(f"Rank {c + self.task_offset[t]}: {torch.linalg.matrix_rank(new_covs[c])}")
 
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
+        covs_not_shrinked = torch.cat((self.covs, new_covs_not_shrinked), dim=0)
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
+
+        return covs_not_shrinked
 
     def adapt_distributions(self, t, trn_loader, val_loader):
         # Train the adapter
