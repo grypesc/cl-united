@@ -369,8 +369,8 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 singularity = loss_singularity(adapted_features)
-                loss += self.alpha * singularity
-                loss.backward()
+                total_loss = loss + self.alpha * singularity
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
@@ -385,8 +385,8 @@ class Appr(Inc_Learning_Appr):
                     target = self.model(images)
                     old_features = self.old_model(images)
                     adapted_features = adapter(old_features)
-                    loss = torch.nn.functional.mse_loss(adapted_features, target)
-                    valid_loss.append(float(bsz * loss))
+                    total_loss = torch.nn.functional.mse_loss(adapted_features, target)
+                    valid_loss.append(float(bsz * total_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_singularity = sum(train_singularity) / len(trn_loader.dataset)
