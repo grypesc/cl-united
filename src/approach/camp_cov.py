@@ -690,5 +690,5 @@ def loss_singularity(features):
     # Idea 1 - determinant
     cov = torch.cov(features.T)
     det = torch.det(cov)
-    loss = - torch.log(torch.clamp(torch.abs(det), max=1))
+    loss = - torch.log(torch.clamp(torch.abs(det), max=10))
     return loss
