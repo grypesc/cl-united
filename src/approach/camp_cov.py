@@ -224,6 +224,8 @@ class Appr(Inc_Learning_Appr):
             train_singularity, train_determinant = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
+            if t > 0:
+                freeze_bn(self.model)
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
@@ -242,8 +244,10 @@ class Appr(Inc_Learning_Appr):
                     total_loss, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
                 elif self.distillation == "projected":
                     total_loss, kd_loss = self.distill_projected(t, loss, features, distiller, images)
-                else:  # feature
+                elif self.distillation == "feature":
                     total_loss, kd_loss = self.distill_features(t, loss, features, images)
+                else:  # no distillation
+                    total_loss, kd_loss = loss, 0.
 
                 singularity, det = loss_singularity(features)
                 if self.alpha > 0:
@@ -255,7 +259,7 @@ class Appr(Inc_Learning_Appr):
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
                 train_singularity.append(float(singularity))
-                train_determinant.append(float(torch.abs(det)))
+                train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
@@ -379,7 +383,7 @@ class Appr(Inc_Learning_Appr):
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
                 train_singularity.append(float(singularity))
-                train_determinant.append(float(torch.abs(det)))
+                train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
             lr_scheduler.step()
 
             adapter.eval()
@@ -686,6 +690,15 @@ class Appr(Inc_Learning_Appr):
         print(f"GT Covs: {gt_cov_norms}")
         print(f"Inverted Covs: {inverted_cov_norms}")
         print(f"GT Inverted Covs: {gt_inverted_cov_norms}")
+
+
+def freeze_bn(model):
+    """Freeze all Batch Normalization layers from the model and use them in eval() mode"""
+    for m in model.modules():
+        if isinstance(m, nn.BatchNorm2d):
+            m.eval()
+            for param in m.parameters():
+                param.requires_grad = False
 
 
 def compute_rotations(images, targets, total_classes):
