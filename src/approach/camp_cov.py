@@ -208,6 +208,7 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
+                                      nn.BatchNorm1d(self.multiplier * self.S),
                                       nn.GELU(),
                                       nn.Linear(self.multiplier * self.S, self.S)
                                       )
@@ -343,11 +344,14 @@ class Appr(Inc_Learning_Appr):
         self.covs_raw = torch.cat((self.covs_raw, new_covs_not_shrinked), dim=0)
 
     def adapt_distributions(self, t, trn_loader, val_loader):
+        trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
+        val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         # Train the adapter
         self.model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.adapter_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
+                                    nn.BatchNorm1d(self.multiplier * self.S),
                                     nn.GELU(),
                                     nn.Linear(self.multiplier * self.S, self.S)
                                     )
