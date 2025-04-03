@@ -26,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, alpha=0.01, distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", normalize=False, shrink1=1., shrink2=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
+                 adaptation_strategy="mean-only", normalize=False, shrink=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -39,7 +39,7 @@ class Appr(Inc_Learning_Appr):
         self.alpha = alpha
         self.tau = tau
         self.multiplier = multiplier
-        self.shrink1, self.shrink2 = shrink1, shrink2
+        self.shrink, self.shrink2 = shrink, 0
         self.default_shrink = 0.01
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
@@ -92,18 +92,14 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=10)
         parser.add_argument('--multiplier',
-                            help='mlp muliplier',
+                            help='mlp multiplier',
                             type=int,
                             default=8)
         parser.add_argument('--tau',
                             help='temperature',
                             type=float,
                             default=2)
-        parser.add_argument('--shrink1',
-                            help='Weight of kd loss',
-                            type=float,
-                            default=1)
-        parser.add_argument('--shrink2',
+        parser.add_argument('--shrink',
                             help='Weight of kd loss',
                             type=float,
                             default=1)
@@ -129,12 +125,12 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca", "proxy-yolo"],
+                            choices=["ce", "proxy-nca", "proxy-yolo", "proxy-yolo"],
                             default="proxy-yolo")
         parser.add_argument('--distillation',
                             help='Loss function',
                             type=str,
-                            choices=["projected", "logit", "feature"],
+                            choices=["projected", "logit", "feature", "none"],
                             default="projected")
         parser.add_argument('--smoothing',
                             help='label smoothing',
@@ -191,7 +187,7 @@ class Appr(Inc_Learning_Appr):
         print(f"Cov matrix det: {torch.linalg.det(covs)}")
         for i in range(covs.shape[0]):
             print(f"Rank for class {i}: {torch.linalg.matrix_rank(self.covs_raw[i], tol=0.01)}, {torch.linalg.matrix_rank(self.covs[i], tol=0.01)}")
-            covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
+            covs[i] = self.shrink_cov(covs[i], self.shrink, self.shrink2)
         if self.is_normalization:
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
@@ -208,7 +204,6 @@ class Appr(Inc_Learning_Appr):
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
-                                      nn.BatchNorm1d(self.multiplier * self.S),
                                       nn.GELU(),
                                       nn.Linear(self.multiplier * self.S, self.S)
                                       )
@@ -226,7 +221,7 @@ class Appr(Inc_Learning_Appr):
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-            train_singularity = []
+            train_singularity, train_determinant = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
             criterion.train()
@@ -250,7 +245,7 @@ class Appr(Inc_Learning_Appr):
                 else:  # feature
                     total_loss, kd_loss = self.distill_features(t, loss, features, images)
 
-                singularity = loss_singularity(features)
+                singularity, det = loss_singularity(features)
                 if self.alpha > 0:
                     total_loss += self.alpha * singularity
                 total_loss.backward()
@@ -260,6 +255,7 @@ class Appr(Inc_Learning_Appr):
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
                 train_singularity.append(float(singularity))
+                train_determinant.append(float(torch.abs(det)))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
@@ -279,8 +275,10 @@ class Appr(Inc_Learning_Appr):
                         _, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
                     elif self.distillation == "projected":
                         _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
-                    else:  # feature
+                    elif self.distillation == "feature":
                         _, kd_loss = self.distill_features(t, loss, features, images)
+                    else:  # no distillation
+                        kd_loss = 0.
 
                     if logits is not None:
                         val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
@@ -289,13 +287,14 @@ class Appr(Inc_Learning_Appr):
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+            train_determinant = sum(train_determinant) / len(train_determinant)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
             train_singularity = sum(train_singularity) / len(train_singularity)
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_singularity:.3f} "
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
         if self.distillation == "logit":
@@ -351,7 +350,6 @@ class Appr(Inc_Learning_Appr):
         adapter = nn.Linear(self.S, self.S)
         if self.adapter_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
-                                    nn.BatchNorm1d(self.multiplier * self.S),
                                     nn.GELU(),
                                     nn.Linear(self.multiplier * self.S, self.S)
                                     )
@@ -364,7 +362,7 @@ class Appr(Inc_Learning_Appr):
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
-            train_singularity = []
+            train_singularity, train_determinant = [], []
             for images, _ in trn_loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
@@ -374,13 +372,14 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
-                singularity = loss_singularity(adapted_features)
+                singularity, det = loss_singularity(adapted_features)
                 total_loss = loss + self.alpha * singularity
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
-                train_singularity.append(float(bsz * singularity))
+                train_singularity.append(float(singularity))
+                train_determinant.append(float(torch.abs(det)))
             lr_scheduler.step()
 
             adapter.eval()
@@ -395,9 +394,10 @@ class Appr(Inc_Learning_Appr):
                     valid_loss.append(float(bsz * total_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
-            train_singularity = sum(train_singularity) / len(trn_loader.dataset)
+            train_determinant = sum(train_determinant) / len(train_determinant)
+            train_singularity = sum(train_singularity) / len(train_singularity)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_singularity:.3f}")
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f}")
 
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
@@ -704,4 +704,4 @@ def loss_singularity(features):
     loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
     if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
         return 7777.
-    return loss
+    return loss, det
