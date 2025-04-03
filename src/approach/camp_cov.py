@@ -49,6 +49,7 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders, self.val_data_loaders = [], []
         self.means = torch.empty((0, self.S), device=self.device)
         self.covs = torch.empty((0, self.S, self.S), device=self.device)
+        self.covs_raw = torch.empty((0, self.S, self.S), device=self.device)  # not shrinked, not adapted
         self.covs_inverted = None
         self.is_mahalanobis = mahalanobis
         self.is_normalization = normalize
@@ -183,13 +184,13 @@ class Appr(Inc_Learning_Appr):
             print("### Adapting prototypes ###")
             self.adapt_distributions(t, trn_loader, val_loader)
         print("### Creating new prototypes ###\n")
-        covs_not_shrinked = self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
+        self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
 
         # Calculate inverted covariances for evaluation with mahalanobis
         covs = self.covs.clone()
         print(f"Cov matrix det: {torch.linalg.det(covs)}")
         for i in range(covs.shape[0]):
-            print(f"Rank for class {i}: {torch.linalg.matrix_rank(covs_not_shrinked[i], tol=0.001)}")
+            print(f"Rank for class {i}: {torch.linalg.matrix_rank(self.covs_raw[i], tol=0.01)}, {torch.linalg.matrix_rank(self.covs[i], tol=0.01)}")
             covs[i] = self.shrink_cov(covs[i], self.shrink1, self.shrink2)
         if self.is_normalization:
             covs = self.norm_cov(covs)
@@ -337,11 +338,9 @@ class Appr(Inc_Learning_Appr):
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
-        covs_not_shrinked = torch.cat((self.covs, new_covs_not_shrinked), dim=0)
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
-
-        return covs_not_shrinked
+        self.covs_raw = torch.cat((self.covs_raw, new_covs_not_shrinked), dim=0)
 
     def adapt_distributions(self, t, trn_loader, val_loader):
         # Train the adapter
