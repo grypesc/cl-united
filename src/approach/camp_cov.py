@@ -711,8 +711,11 @@ def compute_rotations(images, targets, total_classes):
 def loss_singularity(features):
     # Idea 1 - determinant
     cov = torch.cov(features.T)
-    det = torch.det(cov)
-    loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
+    # det = torch.det(cov)
+    # loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
+    cholesky = torch.linalg.cholesky(cov)
+    cholesky_diag = torch.diag(cholesky)
+    loss = - torch.clamp(cholesky_diag, max=1).mean()
     if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
         return torch.tensor(7777.), torch.tensor(0.)
-    return loss, det
+    return loss, torch.det(cov)
