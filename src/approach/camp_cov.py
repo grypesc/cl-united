@@ -224,8 +224,6 @@ class Appr(Inc_Learning_Appr):
             train_singularity, train_determinant = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
-            if t > 0:
-                freeze_bn(self.model)
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
