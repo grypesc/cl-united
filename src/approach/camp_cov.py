@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, alpha=0.01, distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, alpha=0.01, beta=1., distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", normalize=False, shrink=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -37,6 +37,7 @@ class Appr(Inc_Learning_Appr):
         self.dump = dump
         self.lamb = lamb
         self.alpha = alpha
+        self.beta = beta
         self.tau = tau
         self.multiplier = multiplier
         self.shrink, self.shrink2 = shrink, 0
@@ -87,6 +88,10 @@ class Appr(Inc_Learning_Appr):
                             help='Weight of singularity loss',
                             type=float,
                             default=1e-4)
+        parser.add_argument('--beta',
+                            help='Weight of singularity loss',
+                            type=float,
+                            default=1)
         parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
@@ -247,7 +252,7 @@ class Appr(Inc_Learning_Appr):
                 else:  # no distillation
                     total_loss, kd_loss = loss, 0.
 
-                singularity, det = loss_singularity(features)
+                singularity, det = loss_singularity(features, self.beta)
                 if self.alpha > 0:
                     total_loss += self.alpha * singularity
                 total_loss.backward()
@@ -374,7 +379,7 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
-                singularity, det = loss_singularity(adapted_features)
+                singularity, det = loss_singularity(adapted_features, self.beta)
                 total_loss = loss + self.alpha * singularity
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
@@ -708,14 +713,14 @@ def compute_rotations(images, targets, total_classes):
     return images, targets
 
 
-def loss_singularity(features):
+def loss_singularity(features, beta):
     # Idea 1 - determinant
     cov = torch.cov(features.T)
     # det = torch.det(cov)
     # loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
     cholesky = torch.linalg.cholesky(cov)
     cholesky_diag = torch.diag(cholesky)
-    loss = - torch.clamp(cholesky_diag, max=1).mean()
+    loss = - torch.clamp(cholesky_diag, max=beta).mean()
     if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
         return torch.tensor(7777.), torch.tensor(0.)
     return loss, torch.det(cov)
