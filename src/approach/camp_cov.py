@@ -716,5 +716,5 @@ def loss_singularity(features):
     det = torch.det(cov)
     loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
     if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
-        return 7777.
+        return 7777., 0.
     return loss, det
