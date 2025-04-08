@@ -41,7 +41,7 @@ class Appr(Inc_Learning_Appr):
         self.tau = tau
         self.multiplier = multiplier
         self.shrink, self.shrink2 = shrink, 0
-        self.default_shrink = 0.01
+        self.default_shrink = 0.00
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
@@ -649,7 +649,7 @@ class Appr(Inc_Learning_Appr):
             train_indices = torch.tensor(labels) == c
 
             if isinstance(trn_loader.dataset.images, list):
-                train_images = list(compress(trn_loader.dataset.images, train_indices))
+                train_images = list(compress(class_images, train_indices))
                 ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
             else:
                 ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
