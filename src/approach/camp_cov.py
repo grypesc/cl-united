@@ -87,11 +87,11 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--alpha',
                             help='Weight of singularity loss',
                             type=float,
-                            default=1e-4)
+                            default=1.0)
         parser.add_argument('--beta',
                             help='Weight of singularity loss',
                             type=float,
-                            default=1)
+                            default=1.0)
         parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
@@ -99,15 +99,15 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--multiplier',
                             help='mlp multiplier',
                             type=int,
-                            default=8)
+                            default=32)
         parser.add_argument('--tau',
-                            help='temperature',
+                            help='temperature for logit distill',
                             type=float,
                             default=2)
         parser.add_argument('--shrink',
-                            help='Weight of kd loss',
+                            help='shrink during inference',
                             type=float,
-                            default=1)
+                            default=3)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -130,8 +130,8 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca", "proxy-yolo", "proxy-yolo"],
-                            default="proxy-yolo")
+                            choices=["ce", "proxy-nca", "proxy-yolo"],
+                            default="ce")
         parser.add_argument('--distillation',
                             help='Loss function',
                             type=str,
