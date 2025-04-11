@@ -269,7 +269,7 @@ class Appr(Inc_Learning_Appr):
                 else:  # no distillation
                     total_loss, kd_loss = loss, 0.
 
-                singularity, det = 0, 0
+                singularity, det = 0, torch.tensor(0)
                 if self.alpha > 0:
                     singularity, det = loss_singularity(features, self.beta)
                     total_loss += self.alpha * singularity
@@ -397,7 +397,7 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
-                singularity, det = 0, 0
+                singularity, det = 0, torch.tensor(0)
                 if self.alpha > 0:
                     singularity, det = loss_singularity(adapted_features, self.beta)
                 total_loss = loss + self.alpha * singularity
