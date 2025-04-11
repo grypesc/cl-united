@@ -248,7 +248,8 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
 
     elif "cub200" in ds_name.lower():
         trn_transform_list = [
-                transforms.RandomResizedCrop(224),
+                transforms.Resize(256),
+                transforms.RandomCrop(224),
                 # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
