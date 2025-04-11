@@ -248,16 +248,14 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
 
     elif "cub200" in ds_name.lower():
         trn_transform_list = [
-                transforms.Resize((510, 510)),
-                transforms.RandomCrop((224, 224)),
+                transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
-                transforms.RandomApply([transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 5))], p=0.1),
-                transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.1),
+                ImageNetPolicy(),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
                     ]
         tst_transform_list = [
-            transforms.Resize((510, 510)),
+            transforms.Resize((256, 256)),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
