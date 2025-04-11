@@ -233,7 +233,13 @@ class Appr(Inc_Learning_Appr):
         self.heads.eval()
         old_heads = copy.deepcopy(self.heads)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters, t, self.wd)
+        parameters_dict = [
+            {"params": list(self.model.parameters())[:-1]},
+            {"params": list(criterion.parameters()) + list(self.model.parameters())[-1:], "lr": self.lr},  # bigger lr for classifier
+            {"params": list(distiller.parameters())},
+            {"params": list(self.heads.parameters())},
+        ]
+        optimizer, lr_scheduler = self.get_optimizer(parameters_dict if self.pretrained else parameters, t, self.wd)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
