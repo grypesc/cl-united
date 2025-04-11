@@ -127,6 +127,13 @@ dataset_config = {
         'crop': 224,
         'flip': True,
         'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    },
+    'cub200': {
+        'path': join(_BASE_DATA_PATH, 'CUB_200_2011'),
+        "resize": 256,
+        'crop': 224,
+        'flip': True,
+        'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     }
 }
 

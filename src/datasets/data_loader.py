@@ -150,6 +150,14 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
                                                                 class_order=class_order)
         Dataset = basedat.BaseDataset
 
+    elif dataset == 'cub200':
+        _ensure_cub200_subset_prepared(path)
+        # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
+        all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
+                                                                validation=validation, shuffle_classes=class_order is None,
+                                                                class_order=class_order)
+        Dataset = basedat.BaseDataset
+
     elif dataset == 'domainnet':
         _ensure_domainnet_prepared(path, classes_per_domain=nc_first_task, num_tasks=num_tasks)
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
@@ -224,7 +232,7 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         tst_transform_list = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    elif "imagenet" in ds_name.lower():
+    elif "imagenet" in ds_name.lower() or "cub200" in ds_name.lower():
         trn_transform_list = [
                 transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
@@ -270,6 +278,43 @@ def _ensure_imagenet_subset_prepared(path):
                 f.write(f"{relative_path} {lbl}\n")
     prepare_split()
     prepare_split('val', outfile='test.txt')
+
+
+def _ensure_cub200_subset_prepared(path):
+    assert os.path.exists(path), f"Please first download and extract dataset from: https://www.kaggle.com/datasets/arjunashok33/imagenet-subset-for-inc-learn to dir: {path}"
+    image_class_labels = {}
+    with open(f"{path}/{'image_class_labels.txt'}", 'r') as f:
+        lines = f.readlines()
+    for line in lines:
+        i, c = line.replace("\n", "").split(" ")
+        image_class_labels[i] = c
+
+    images = {}
+    with open(f"{path}/{'images.txt'}", 'r') as f:
+        lines = f.readlines()
+    for line in lines:
+        i, c = line.replace("\n", "").split(" ")
+        images[i] = c
+
+    train = {}
+    test = {}
+    with open(f"{path}/{'train_test_split.txt'}", 'r') as f:
+        lines = f.readlines()
+    for line in lines:
+        image_num, is_training = line.replace("\n", "").split(" ")
+        if is_training == "1":
+            train[images[image_num]] = image_class_labels[image_num]
+        else:
+            test[images[image_num]] = image_class_labels[image_num]
+
+    with open(f"{path}/{'train.txt'}", 'wt') as f:
+        for k, v in train.items():
+            f.write(f"images/{k} {int(v) - 1} \n")
+
+    with open(f"{path}/{'test.txt'}", 'wt') as f:
+        for k, v in test.items():
+            f.write(f"images/{k} {int(v) - 1} \n")
+
 
 def _ensure_domainnet_prepared(path, classes_per_domain=50, num_tasks=6):
     assert os.path.exists(path), f"Please first download and extract dataset from: http://ai.bu.edu/M3SDA/#dataset into:{path}"
