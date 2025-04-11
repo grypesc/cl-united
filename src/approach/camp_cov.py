@@ -46,7 +46,9 @@ class Appr(Inc_Learning_Appr):
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
         self.model = resnet18(num_features=S, is_224=use_224)
+        self.pretrained = pretrained_net
         if pretrained_net:
+            # wget https://download.pytorch.org/models/resnet18-f37072fd.pth
             state_dict = torch.load("../resnet18-f37072fd.pth")
             del state_dict["fc.weight"]
             del state_dict["fc.bias"]
@@ -247,7 +249,7 @@ class Appr(Inc_Learning_Appr):
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
-                features = self.model(images)
+                features = self.model(images, detach_bottleneck=(self.pretrained and epoch < 5))
                 if epoch < int(self.nepochs * 0.01) and t > 0:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
@@ -540,7 +542,10 @@ class Appr(Inc_Learning_Appr):
     def get_optimizer(self, parameters, t, wd):
         """Returns the optimizer"""
         milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
-        optimizer = torch.optim.SGD(parameters, lr=self.lr if t == 0 else 0.1*self.lr, weight_decay=wd, momentum=0.9)
+        lr = self.lr
+        if t > 0 or self.pretrained:
+            lr *= 0.1
+        optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 

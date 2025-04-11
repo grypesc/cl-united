@@ -232,9 +232,24 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         tst_transform_list = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    elif "imagenet" in ds_name.lower() or "cub200" in ds_name.lower():
+    elif "imagenet" in ds_name.lower():
         trn_transform_list = [
                 transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                    ]
+        tst_transform_list = [
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ]
+
+    elif "cub200" in ds_name.lower():
+        trn_transform_list = [
+                transforms.RandomResizedCrop(224),
+                # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
