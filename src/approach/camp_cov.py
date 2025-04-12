@@ -211,6 +211,7 @@ class Appr(Inc_Learning_Appr):
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
         self.print_covs(trn_loader, val_loader)
+        self.print_mahalanobis(t)
 
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
         trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
@@ -716,6 +717,27 @@ class Appr(Inc_Learning_Appr):
         print(f"GT Covs: {gt_cov_norms}")
         print(f"Inverted Covs: {inverted_cov_norms}")
         print(f"GT Inverted Covs: {gt_inverted_cov_norms}")
+
+    @torch.no_grad()
+    def print_mahalanobis(self, t):
+        self.model.eval()
+        mahalanobis_per_class = torch.zeros((0, self.means.shape[0]), device=self.device)
+        for val_loader in self.val_data_loaders:
+            for images, targets in val_loader:
+                images = images.to(self.device, non_blocking=True)
+                features = self.model(images)
+
+                diff = features.unsqueeze(1) - self.means.unsqueeze(0)
+                res = diff.unsqueeze(2) @ self.covs_inverted.unsqueeze(0)
+                res = res @ diff.unsqueeze(3)
+                dist = res.squeeze(2).squeeze(2)
+                mahalanobis_per_class = torch.cat((mahalanobis_per_class, dist), dim=0)
+
+        mahalanobis_per_task = []
+        for i in range(t+1):
+            mahalanobis_per_task.append(float(mahalanobis_per_class[:, self.task_offset[i]:self.task_offset[i+1]].mean()))
+
+        print(f"Mahalanobis per task: {list(mahalanobis_per_task)}")
 
 
 def freeze_bn(model):
