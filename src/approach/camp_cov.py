@@ -462,7 +462,7 @@ class Appr(Inc_Learning_Appr):
                     train_indices = torch.tensor(labels) == c
 
                     if isinstance(trn_loader.dataset.images, list):
-                        train_images = list(compress(trn_loader.dataset.images, train_indices))
+                        train_images = list(compress(class_images, train_indices))
                         ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
                     else:
                         ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
