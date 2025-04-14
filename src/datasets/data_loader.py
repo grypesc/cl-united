@@ -150,6 +150,14 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
                                                                 class_order=class_order)
         Dataset = basedat.BaseDataset
 
+    elif dataset == 'tiny':
+        _ensure_tiny_prepared(path)
+        # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
+        all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
+                                                                validation=validation, shuffle_classes=class_order is None,
+                                                                class_order=class_order)
+        Dataset = basedat.BaseDataset
+
     elif dataset == 'cub200':
         _ensure_cub200_subset_prepared(path)
         # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
@@ -221,18 +229,21 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
             transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
         ]
         tst_transform_list = [transforms.ToTensor(), transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))]
-    elif "tinyimagenet200" in ds_name.lower():
-        trn_transform_list = transforms.Compose(
-            [transforms.RandomCrop(64, padding=8),
+
+    elif "tiny" in ds_name.lower():
+        trn_transform_list = [
+             transforms.RandomCrop(64, padding=8),
              transforms.RandomHorizontalFlip(),
              transforms.ToTensor(),
              transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-             ])
+             ]
 
-        tst_transform_list = transforms.Compose([
+        tst_transform_list = [
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    elif "imagenet" in ds_name.lower():
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ]
+
+    elif "imagenet_subset" in ds_name.lower():
         trn_transform_list = [
                 transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
@@ -292,6 +303,26 @@ def _ensure_imagenet_subset_prepared(path):
                 f.write(f"{relative_path} {lbl}\n")
     prepare_split()
     prepare_split('val', outfile='test.txt')
+
+
+def _ensure_tiny_prepared(path):
+    assert os.path.exists(path), f"Please first download and extract dataset from: http://cs231n.stanford.edu/tiny-imagenet-200.zip to dir: {path}"
+    classes = os.listdir(path + "/train")
+    class2idx = {c: i for i, c in enumerate(classes)}
+
+    with open(f"{path}/train.txt", 'wt') as f:
+        for c in classes:
+            images = os.listdir(path + f"/train/{c}/images")
+            for image in images:
+                f.write(f"train/{c}/images/{image} {class2idx[c]}\n")
+
+    with open(f"{path}/val/val_annotations.txt", 'r') as f:
+        val_annotations = f.readlines()
+
+    with open(f"{path}/test.txt", 'wt') as f:
+        for anno in val_annotations:
+            image, label = anno.split("\t")[:2]
+            f.write(f"val/images/{image} {class2idx[label]}\n")
 
 
 def _ensure_cub200_subset_prepared(path):

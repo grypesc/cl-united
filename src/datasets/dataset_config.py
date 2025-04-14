@@ -89,6 +89,13 @@ dataset_config = {
             36, 61, 7, 63, 75, 5, 32, 4, 51, 48, 73, 93, 39, 67, 29, 49, 57, 33
         ]
     },
+    'tiny': {
+        'path': join(_BASE_DATA_PATH, 'tiny-imagenet-200'),
+        'resize': None,
+        'crop': 64,
+        'flip': True,
+        'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    },
     'imagenet_32_reduced': {
         'path': join(_BASE_DATA_PATH, 'ILSVRC12_32'),
         'resize': None,
