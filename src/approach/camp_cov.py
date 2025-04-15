@@ -26,7 +26,7 @@ class Appr(Inc_Learning_Appr):
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
                  logger=None, N=10000, alpha=0.01, beta=1., distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", pretrained_net=False, normalize=False, shrink=1., multiplier=8, mahalanobis=False, nnet="resnet18"):
+                 adaptation_strategy="mean-only", pretrained_net=False, normalize=False, shrink=0., shrink_inference=0., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -41,6 +41,7 @@ class Appr(Inc_Learning_Appr):
         self.tau = tau
         self.multiplier = multiplier
         self.shrink = shrink
+        self.shrink_inference = shrink_inference
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
@@ -111,6 +112,10 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=2)
         parser.add_argument('--shrink',
+                            help='shrink during inference',
+                            type=float,
+                            default=0)
+        parser.add_argument('--shrink-inference',
                             help='shrink during inference',
                             type=float,
                             default=0)
@@ -202,7 +207,7 @@ class Appr(Inc_Learning_Appr):
         print(f"Cov matrix det: {torch.linalg.det(covs)}")
         for i in range(covs.shape[0]):
             print(f"Rank for class {i}: {torch.linalg.matrix_rank(self.covs_raw[i], tol=0.01)}, {torch.linalg.matrix_rank(self.covs[i], tol=0.01)}")
-            covs[i] = self.shrink_cov(covs[i], 3)
+            covs[i] = self.shrink_cov(covs[i], self.shrink_inference)
         if self.is_normalization:
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
