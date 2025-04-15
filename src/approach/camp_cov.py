@@ -40,8 +40,7 @@ class Appr(Inc_Learning_Appr):
         self.beta = beta
         self.tau = tau
         self.multiplier = multiplier
-        self.shrink, self.shrink2 = shrink, 0
-        self.default_shrink = 0.00
+        self.shrink = shrink
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
@@ -114,7 +113,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--shrink',
                             help='shrink during inference',
                             type=float,
-                            default=3)
+                            default=0)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -203,7 +202,7 @@ class Appr(Inc_Learning_Appr):
         print(f"Cov matrix det: {torch.linalg.det(covs)}")
         for i in range(covs.shape[0]):
             print(f"Rank for class {i}: {torch.linalg.matrix_rank(self.covs_raw[i], tol=0.01)}, {torch.linalg.matrix_rank(self.covs[i], tol=0.01)}")
-            covs[i] = self.shrink_cov(covs[i], self.shrink, self.shrink2)
+            covs[i] = self.shrink_cov(covs[i], 3)
         if self.is_normalization:
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
@@ -356,7 +355,7 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.default_shrink)
+            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.shrink)
             new_covs_not_shrinked[c] = torch.cov(class_features.T)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
@@ -480,7 +479,7 @@ class Appr(Inc_Learning_Appr):
 
                     gt_mean = class_features.mean(0)
                     gt_cov = torch.cov(class_features.T)
-                    gt_cov = self.shrink_cov(gt_cov, self.default_shrink)
+                    gt_cov = self.shrink_cov(gt_cov, self.shrink)
                     gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
                     if self.adaptation_strategy == "diag":
                         gt_cov = torch.diag(torch.diag(gt_cov))
@@ -692,7 +691,7 @@ class Appr(Inc_Learning_Appr):
             gt_means.append(class_features.mean(0))
             cov = torch.cov(class_features.T)
             gt_covs.append(cov)
-            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, self.default_shrink)))
+            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, self.shrink)))
 
         gt_means = torch.stack(gt_means)
         gt_covs = torch.stack(gt_covs)
