@@ -408,8 +408,8 @@ class Appr(Inc_Learning_Appr):
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 anti_collapse, det = 0, 0
-                if self.alpha > 0:
-                    anti_collapse, det = anti_collapse_loss(adapted_features, self.beta)
+                # if self.alpha > 0:
+                #     anti_collapse, det = anti_collapse_loss(adapted_features, self.beta)
                 total_loss = loss + self.alpha * anti_collapse
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
@@ -768,6 +768,6 @@ def anti_collapse_loss(features_buffer, beta):
         loss_per_class.append(loss)
         dets.append(float(torch.det(cov)))
     loss = torch.mean(torch.stack(loss_per_class))
-    if bool(torch.isnan(loss)):
-        return torch.tensor(69.), torch.tensor(69.)
+    if bool(torch.isnan(loss)):  # Loss is nan when the buffer is not filled with features
+        return torch.tensor(1.69), torch.tensor(1.69)
     return loss, min(dets)
