@@ -92,11 +92,11 @@ class Appr(Inc_Learning_Appr):
                             type=int,
                             default=64)
         parser.add_argument('--alpha',
-                            help='Weight of singularity loss',
+                            help='Weight of anti_collapse loss',
                             type=float,
                             default=1.0)
         parser.add_argument('--beta',
-                            help='Weight of singularity loss',
+                            help='Weight of anti_collapse loss',
                             type=float,
                             default=1.0)
         parser.add_argument('--lamb',
@@ -245,11 +245,11 @@ class Appr(Inc_Learning_Appr):
             {"params": list(self.heads.parameters())},
         ]
         optimizer, lr_scheduler = self.get_optimizer(parameters_dict if self.pretrained else parameters, t, self.wd)
-        features_buffer = torch.zeros((512, num_classes_in_t, self.S))
+        features_buffer = [torch.zeros((256, self.S), device=self.device) for _ in range(num_classes_in_t)]
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-            train_singularity, train_determinant = [], []
+            train_anti_collapse, train_determinant = [], []
             train_hits, val_hits = 0, 0
             self.model.train()
             criterion.train()
@@ -262,7 +262,7 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images, detach_bottleneck=(self.pretrained and epoch < 5))
-                if epoch < int(self.nepochs * 0.01) and t > 0:
+                if epoch < 1:
                     features = features.detach()
                 loss, logits = criterion(features, targets)
 
@@ -275,18 +275,22 @@ class Appr(Inc_Learning_Appr):
                 else:  # no distillation
                     total_loss, kd_loss = loss, 0.
 
-                singularity, det = 0, torch.tensor(0)
+                for c in range(num_classes_in_t):
+                    features_buffer[c] = features_buffer[c].detach()
+                    features_buffer[c] = torch.cat((features[targets == c], features_buffer[c]), dim=0)[:256]
+
+                anti_collapse, det = 0, 0
                 if self.alpha > 0:
-                    singularity, det = loss_singularity(features, self.beta)
-                    total_loss += self.alpha * singularity
+                    anti_collapse, det = anti_collapse_loss(features_buffer, self.beta)
+                    total_loss += self.alpha * anti_collapse
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
-                train_singularity.append(float(singularity))
-                train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
+                train_anti_collapse.append(float(anti_collapse))
+                train_determinant.append(float(det))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
@@ -321,11 +325,11 @@ class Appr(Inc_Learning_Appr):
             train_determinant = sum(train_determinant) / len(train_determinant)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
             valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
-            train_singularity = sum(train_singularity) / len(train_singularity)
+            train_anti_collapse = sum(train_anti_collapse) / len(train_anti_collapse)
             train_acc = train_hits / len(trn_loader.dataset)
             val_acc = val_hits / len(val_loader.dataset)
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f} "
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Anti-Collapse: {train_anti_collapse:.3f} Det: {train_determinant:.5f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
         if self.distillation == "logit":
@@ -393,7 +397,7 @@ class Appr(Inc_Learning_Appr):
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
-            train_singularity, train_determinant = [], []
+            train_anti_collapse, train_determinant = [], []
             for images, _ in trn_loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
@@ -403,16 +407,16 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
-                singularity, det = 0, torch.tensor(0)
+                anti_collapse, det = 0, 0
                 if self.alpha > 0:
-                    singularity, det = loss_singularity(adapted_features, self.beta)
-                total_loss = loss + self.alpha * singularity
+                    anti_collapse, det = anti_collapse_loss(adapted_features, self.beta)
+                total_loss = loss + self.alpha * anti_collapse
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
-                train_singularity.append(float(singularity))
-                train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
+                train_anti_collapse.append(float(anti_collapse))
+                train_determinant.append(det)
             lr_scheduler.step()
 
             adapter.eval()
@@ -428,9 +432,9 @@ class Appr(Inc_Learning_Appr):
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_determinant = sum(train_determinant) / len(train_determinant)
-            train_singularity = sum(train_singularity) / len(train_singularity)
+            train_anti_collapse = sum(train_anti_collapse) / len(train_anti_collapse)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f}")
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Anti-Collapse: {train_anti_collapse:.3f} Det: {train_determinant:.5f}")
 
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
@@ -745,15 +749,6 @@ class Appr(Inc_Learning_Appr):
         print(f"Mahalanobis per task: {list(mahalanobis_per_task)}")
 
 
-def freeze_bn(model):
-    """Freeze all Batch Normalization layers from the model and use them in eval() mode"""
-    for m in model.modules():
-        if isinstance(m, nn.BatchNorm2d):
-            m.eval()
-            for param in m.parameters():
-                param.requires_grad = False
-
-
 def compute_rotations(images, targets, total_classes):
     # compute self-rotation for the first task following PASS https://github.com/Impression2805/CVPR21_PASS
     images_rot = torch.cat([torch.rot90(images, k, (2, 3)) for k in range(1, 4)])
@@ -763,14 +758,16 @@ def compute_rotations(images, targets, total_classes):
     return images, targets
 
 
-def loss_singularity(features, beta):
-    # Idea 1 - determinant
-    cov = torch.cov(features.T)
-    # det = torch.det(cov)
-    # loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
-    cholesky = torch.linalg.cholesky(cov)
-    cholesky_diag = torch.diag(cholesky)
-    loss = - torch.clamp(cholesky_diag, max=beta).mean()
-    if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
-        return torch.tensor(7777.), torch.tensor(0.)
-    return loss, torch.det(cov)
+def anti_collapse_loss(features_buffer, beta):
+    loss_per_class, dets = [], []
+    for c, features in enumerate(features_buffer):
+        cov = torch.cov(features.T)
+        cholesky = torch.linalg.cholesky(cov)
+        cholesky_diag = torch.diag(cholesky)
+        loss = - torch.clamp(cholesky_diag, max=beta).mean()
+        loss_per_class.append(loss)
+        dets.append(float(torch.det(cov)))
+    loss = torch.mean(torch.stack(loss_per_class))
+    if bool(torch.isnan(loss)):
+        return torch.tensor(69.), torch.tensor(69.)
+    return loss, min(dets)
