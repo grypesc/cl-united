@@ -232,7 +232,8 @@ class Appr(Inc_Learning_Appr):
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         if t == 0 and self.is_rotation:
-            criterion = self.criterion(4*num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
+            num_classes_in_t = 4*num_classes_in_t
+            criterion = self.criterion(num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
             trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size // 4, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
             val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size // 4, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         self.heads.eval()
@@ -256,7 +257,7 @@ class Appr(Inc_Learning_Appr):
             distiller.train()
             for images, targets in trn_loader:
                 if t == 0 and self.is_rotation:
-                    images, targets = compute_rotations(images, targets, num_classes_in_t)
+                    images, targets = compute_rotations(images, targets, num_classes_in_t // 4)
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
@@ -280,7 +281,7 @@ class Appr(Inc_Learning_Appr):
                     features_buffer[c] = torch.cat((features[targets == c], features_buffer[c]), dim=0)[:256]
 
                 anti_collapse, det = 0, 0
-                if self.alpha > 0:
+                if self.alpha > 0 and epoch > 0:
                     anti_collapse, det = anti_collapse_loss(features_buffer, self.beta)
                     total_loss += self.alpha * anti_collapse
                 total_loss.backward()
@@ -300,7 +301,7 @@ class Appr(Inc_Learning_Appr):
             with torch.no_grad():
                 for images, targets in val_loader:
                     if t == 0 and self.is_rotation:
-                        images, targets = compute_rotations(images, targets, num_classes_in_t)
+                        images, targets = compute_rotations(images, targets, num_classes_in_t // 4)
                     targets -= self.task_offset[t]
                     bsz = images.shape[0]
                     images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
