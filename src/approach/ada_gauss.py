@@ -759,16 +759,29 @@ def compute_rotations(images, targets, total_classes):
     return images, targets
 
 
+# def anti_collapse_loss(features_buffer, beta):
+#     loss_per_class, dets = [], []
+#     for features in features_buffer:
+#         cov = torch.cov(features.T)
+#         cholesky = torch.linalg.cholesky(cov)
+#         cholesky_diag = torch.diag(cholesky)
+#         loss = torch.clamp(cholesky_diag, max=beta).mean()
+#         loss_per_class.append(loss)
+#         dets.append(float(torch.det(cov)))
+#     loss = - torch.mean(torch.stack(loss_per_class))
+#     if bool(torch.isnan(loss)):  # Loss is nan when the buffer is not filled with features
+#         return torch.tensor(1.69), torch.tensor(1.69)
+#     return loss, min(dets)
+
 def anti_collapse_loss(features_buffer, beta):
     loss_per_class, dets = [], []
     for features in features_buffer:
         cov = torch.cov(features.T)
-        cholesky = torch.linalg.cholesky(cov)
-        cholesky_diag = torch.diag(cholesky)
-        loss = torch.clamp(cholesky_diag, max=beta).mean()
+        det = torch.linalg.det(cov)
+        loss = -torch.log(torch.clamp(det, max=beta))
         loss_per_class.append(loss)
-        dets.append(float(torch.det(cov)))
-    loss = - torch.mean(torch.stack(loss_per_class))
-    if bool(torch.isnan(loss)):  # Loss is nan when the buffer is not filled with features
-        return torch.tensor(1.69), torch.tensor(1.69)
+        dets.append(float(det))
+    loss = torch.mean(torch.stack(loss_per_class))
+    if bool(torch.isnan(loss)) or bool(torch.isinf(loss)):  # Loss is nan when the buffer is not filled with features
+        return torch.tensor(-69), torch.tensor(-69)
     return loss, min(dets)
