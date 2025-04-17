@@ -25,7 +25,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, alpha=0.01, beta=1., distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, alpha=0.01, beta=1., distillation="projected", K=256, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="mean-only", pretrained_net=False, normalize=False, shrink=0., shrink_inference=0., multiplier=8, mahalanobis=False, nnet="resnet18"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -86,7 +86,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--K',
                             help='number of learners sampled for task',
                             type=int,
-                            default=3)
+                            default=256)
         parser.add_argument('--S',
                             help='latent space size',
                             type=int,
@@ -246,7 +246,7 @@ class Appr(Inc_Learning_Appr):
             {"params": list(self.heads.parameters())},
         ]
         optimizer, lr_scheduler = self.get_optimizer(parameters_dict if self.pretrained else parameters, t, self.wd)
-        features_buffer = [torch.zeros((256, self.S), device=self.device) for _ in range(num_classes_in_t)]
+        features_buffer = [torch.zeros((self.K, self.S), device=self.device) for _ in range(num_classes_in_t)]
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -278,7 +278,7 @@ class Appr(Inc_Learning_Appr):
 
                 for c in range(num_classes_in_t):
                     features_buffer[c] = features_buffer[c].detach()
-                    features_buffer[c] = torch.cat((features[targets == c], features_buffer[c]), dim=0)[:256]
+                    features_buffer[c] = torch.cat((features[targets == c], features_buffer[c]), dim=0)[:self.K]
 
                 anti_collapse, det = 0, 0
                 if self.alpha > 0 and epoch > 0:
@@ -761,14 +761,14 @@ def compute_rotations(images, targets, total_classes):
 
 def anti_collapse_loss(features_buffer, beta):
     loss_per_class, dets = [], []
-    for c, features in enumerate(features_buffer):
+    for features in features_buffer:
         cov = torch.cov(features.T)
         cholesky = torch.linalg.cholesky(cov)
         cholesky_diag = torch.diag(cholesky)
-        loss = - torch.clamp(cholesky_diag, max=beta).mean()
+        loss = torch.clamp(cholesky_diag, max=beta).mean()
         loss_per_class.append(loss)
         dets.append(float(torch.det(cov)))
-    loss = torch.mean(torch.stack(loss_per_class))
+    loss = - torch.mean(torch.stack(loss_per_class))
     if bool(torch.isnan(loss)):  # Loss is nan when the buffer is not filled with features
         return torch.tensor(1.69), torch.tensor(1.69)
     return loss, min(dets)
