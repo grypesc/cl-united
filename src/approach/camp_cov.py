@@ -118,7 +118,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--shrink-inference',
                             help='shrink during inference',
                             type=float,
-                            default=0)
+                            default=3)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -211,6 +211,14 @@ class Appr(Inc_Learning_Appr):
         if self.is_normalization:
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
+
+        # sampled_protos_norms = []
+        # for c in range(self.means.shape[0]):
+        #     cov = self.covs[c].clone()
+        #     distribution = MultivariateNormal(self.means[c], cov)
+        #     samples = distribution.sample((self.N,))
+        #     sampled_protos_norms.append(float(samples.norm(dim=1).mean()))
+        # print(sampled_protos_norms)
 
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
