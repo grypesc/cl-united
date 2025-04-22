@@ -752,15 +752,6 @@ class Appr(Inc_Learning_Appr):
         print(f"Mahalanobis per task: {list(mahalanobis_per_task)}")
 
 
-def freeze_bn(model):
-    """Freeze all Batch Normalization layers from the model and use them in eval() mode"""
-    for m in model.modules():
-        if isinstance(m, nn.BatchNorm2d):
-            m.eval()
-            for param in m.parameters():
-                param.requires_grad = False
-
-
 def compute_rotations(images, targets, total_classes):
     # compute self-rotation for the first task following PASS https://github.com/Impression2805/CVPR21_PASS
     images_rot = torch.cat([torch.rot90(images, k, (2, 3)) for k in range(1, 4)])
