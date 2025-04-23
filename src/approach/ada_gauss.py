@@ -218,7 +218,12 @@ class Appr(Inc_Learning_Appr):
         #     distribution = MultivariateNormal(self.means[c], cov)
         #     samples = distribution.sample((self.N,))
         #     sampled_protos_norms.append(float(samples.norm(dim=1).mean()))
-        # print(sampled_protos_norms)
+        # sampled_protos_norms = np.array(sampled_protos_norms)
+        # sampled_norm_per_task = []
+        # for i in range(len(self.task_offset[:-1])):
+        #     mean = np.mean(sampled_protos_norms[self.task_offset[i]:self.task_offset[i+1]])
+        #     sampled_norm_per_task.append(mean)
+        # print(f"Norm of pseudoprototypes {sampled_norm_per_task}")
 
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
@@ -297,31 +302,32 @@ class Appr(Inc_Learning_Appr):
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
-            self.model.eval()
-            criterion.eval()
-            distiller.eval()
-            with torch.no_grad():
-                for images, targets in val_loader:
-                    if t == 0 and self.is_rotation:
-                        images, targets = compute_rotations(images, targets, num_classes_in_t)
-                    targets -= self.task_offset[t]
-                    bsz = images.shape[0]
-                    images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
-                    features = self.model(images)
-                    loss, logits = criterion(features, targets)
-                    if self.distillation == "logit":
-                        _, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
-                    elif self.distillation == "projected":
-                        _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
-                    elif self.distillation == "feature":
-                        _, kd_loss = self.distill_features(t, loss, features, images)
-                    else:  # no distillation
-                        kd_loss = 0.
+            if epoch % 10 == 9:
+                self.model.eval()
+                criterion.eval()
+                distiller.eval()
+                with torch.no_grad():
+                    for images, targets in val_loader:
+                        if t == 0 and self.is_rotation:
+                            images, targets = compute_rotations(images, targets, num_classes_in_t)
+                        targets -= self.task_offset[t]
+                        bsz = images.shape[0]
+                        images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                        features = self.model(images)
+                        loss, logits = criterion(features, targets)
+                        if self.distillation == "logit":
+                            _, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
+                        elif self.distillation == "projected":
+                            _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
+                        elif self.distillation == "feature":
+                            _, kd_loss = self.distill_features(t, loss, features, images)
+                        else:  # no distillation
+                            kd_loss = 0.
 
-                    if logits is not None:
-                        val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
-                    valid_loss.append(float(bsz * loss))
-                    valid_kd_loss.append(float(bsz * kd_loss))
+                        if logits is not None:
+                            val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
+                        valid_loss.append(float(bsz * loss))
+                        valid_kd_loss.append(float(bsz * kd_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
@@ -422,16 +428,17 @@ class Appr(Inc_Learning_Appr):
                 train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
             lr_scheduler.step()
 
-            adapter.eval()
-            with torch.no_grad():
-                for images, _ in val_loader:
-                    bsz = images.shape[0]
-                    images = images.to(self.device, non_blocking=True)
-                    target = self.model(images)
-                    old_features = self.old_model(images)
-                    adapted_features = adapter(old_features)
-                    total_loss = torch.nn.functional.mse_loss(adapted_features, target)
-                    valid_loss.append(float(bsz * total_loss))
+            if epoch % 10 == 9:
+                adapter.eval()
+                with torch.no_grad():
+                    for images, _ in val_loader:
+                        bsz = images.shape[0]
+                        images = images.to(self.device, non_blocking=True)
+                        target = self.model(images)
+                        old_features = self.old_model(images)
+                        adapted_features = adapter(old_features)
+                        total_loss = torch.nn.functional.mse_loss(adapted_features, target)
+                        valid_loss.append(float(bsz * total_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_determinant = sum(train_determinant) / len(train_determinant)
