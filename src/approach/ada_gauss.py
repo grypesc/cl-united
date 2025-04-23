@@ -92,11 +92,11 @@ class Appr(Inc_Learning_Appr):
                             type=int,
                             default=64)
         parser.add_argument('--alpha',
-                            help='Weight of singularity loss',
+                            help='Weight of anti-collapse loss',
                             type=float,
                             default=1.0)
         parser.add_argument('--beta',
-                            help='Weight of singularity loss',
+                            help='Anti-collapse loss clamp',
                             type=float,
                             default=1.0)
         parser.add_argument('--lamb',
@@ -246,13 +246,13 @@ class Appr(Inc_Learning_Appr):
         self.heads.eval()
         old_heads = copy.deepcopy(self.heads)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
-        parameters_dict = [
-            {"params": list(self.model.parameters())[:-1]},
-            {"params": list(criterion.parameters()) + list(self.model.parameters())[-1:], "lr": self.lr},  # bigger lr for classifier
-            {"params": list(distiller.parameters())},
-            {"params": list(self.heads.parameters())},
-        ]
-        optimizer, lr_scheduler = self.get_optimizer(parameters_dict if self.pretrained else parameters, t, self.wd)
+        # parameters_dict = [
+        #     {"params": list(self.model.parameters())[:-1]},
+        #     {"params": list(criterion.parameters()) + list(self.model.parameters())[-1:], "lr": self.lr},  # bigger lr for classifier
+        #     {"params": list(distiller.parameters())},
+        #     {"params": list(self.heads.parameters())},
+        # ]
+        optimizer, lr_scheduler = self.get_optimizer(parameters, t, self.wd)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -268,8 +268,8 @@ class Appr(Inc_Learning_Appr):
                 bsz = images.shape[0]
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
-                features = self.model(images, detach_bottleneck=(self.pretrained and epoch < 5))
-                if epoch < int(self.nepochs * 0.01) and t > 0:
+                features = self.model(images)
+                if epoch < int(self.nepochs * 0.01):
                     features = features.detach()
                 loss, logits = criterion(features, targets)
 
@@ -565,7 +565,7 @@ class Appr(Inc_Learning_Appr):
         """Returns the optimizer"""
         milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
         lr = self.lr
-        if t > 0 or self.pretrained:
+        if t > 0:
             lr *= 0.1
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
