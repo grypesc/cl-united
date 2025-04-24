@@ -16,7 +16,7 @@ def main():
     results = {}
     dataset_name = "/home/greg/WYNIKI2/motivation-final/"
     methods = ['none', 'feature', 'logit', 'projected']
-    colors = ["tab:blue", "tab:orange", "tab:green", "tab:purple", "k"]
+    colors = ["tab:orange", "tab:blue", "tab:green", "tab:purple", "k"]
     for i, method in enumerate(methods):
         log_name = dataset_name + method
         files = os.listdir(log_name)
