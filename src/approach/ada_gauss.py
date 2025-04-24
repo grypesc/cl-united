@@ -252,7 +252,7 @@ class Appr(Inc_Learning_Appr):
         old_heads = copy.deepcopy(self.heads)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
         parameters_dict = [
-            {"params": list(self.model.parameters())[:-1], "lr": 0.01 if t == 0 else 0.001},
+            {"params": list(self.model.parameters())[:-1], "lr": 0.01},
             {"params": list(criterion.parameters()) + list(self.model.parameters())[-1:]},
             {"params": list(distiller.parameters())},
             {"params": list(self.heads.parameters())},
