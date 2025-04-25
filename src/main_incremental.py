@@ -283,6 +283,8 @@ def main(argv=None):
         # Train
         appr.train(t, trn_loader[t], val_loader[t])
         print('-' * 108)
+        # if t < 9:
+        #     continue
 
         # Test
         for u in range(t + 1):

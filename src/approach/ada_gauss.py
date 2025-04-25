@@ -20,19 +20,34 @@ from .criterions.ce import CE
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 
+class SampledDataset(torch.utils.data.Dataset):
+    """ Dataset that samples pseudo prototypes from memorized distributions to train pseudo head """
+    def __init__(self, distributions, samples, task_offset):
+        self.distributions = distributions
+        self.samples = samples
+        self.total_classes = task_offset[-1]
+
+    def __len__(self):
+        return self.samples
+
+    def __getitem__(self, index):
+        target = random.randint(0, self.total_classes-1)
+        val = self.distributions[target].sample()
+        return val, target
+
+
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, alpha=0.01, beta=1., distillation="projected", K=3, use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="mean-only", pretrained_net=False, normalize=False, shrink=0., shrink_inference=0., multiplier=8, mahalanobis=False, nnet="resnet18"):
+                 logger=None, N=10000, alpha=0.01, beta=1., distillation="projected", use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., shrink_inference=0., multiplier=8, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
 
         self.N = N
-        self.K = K
         self.S = S
         self.dump = dump
         self.lamb = lamb
@@ -59,7 +74,8 @@ class Appr(Inc_Learning_Appr):
         self.covs = torch.empty((0, self.S, self.S), device=self.device)
         self.covs_raw = torch.empty((0, self.S, self.S), device=self.device)  # not shrinked, not adapted
         self.covs_inverted = None
-        self.is_mahalanobis = mahalanobis
+        self.classifier = classifier
+        self.pseudo_head = None
         self.is_normalization = normalize
         self.is_rotation = rotation
         self.task_offset = [0]
@@ -83,10 +99,6 @@ class Appr(Inc_Learning_Appr):
                             help='Number of samples to adapt cov',
                             type=int,
                             default=10000)
-        parser.add_argument('--K',
-                            help='number of learners sampled for task',
-                            type=int,
-                            default=3)
         parser.add_argument('--S',
                             help='latent space size',
                             type=int,
@@ -126,8 +138,8 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--adaptation-strategy',
                             help='Activation functions in resnet',
                             type=str,
-                            choices=["no-adapt", "mean-only", "diag", "full"],
-                            default="mean-only")
+                            choices=["none", "mean", "diag", "full"],
+                            default="full")
         parser.add_argument('--distiller',
                             help='Distiller',
                             type=str,
@@ -143,6 +155,11 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["ce", "proxy-nca", "proxy-yolo"],
                             default="ce")
+        parser.add_argument('--classifier',
+                            help='Classifier type',
+                            type=str,
+                            choices=["linear", "bayes", "nmc"],
+                            default="bayes")
         parser.add_argument('--distillation',
                             help='Loss function',
                             type=str,
@@ -153,15 +170,11 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=0.0)
         parser.add_argument('--use-224',
-                            help='xxx',
-                            action='store_true',
-                            default=False)
-        parser.add_argument('--mahalanobis',
-                            help='xxx',
+                            help='Additional max pool and different conv1 in Resnet18',
                             action='store_true',
                             default=False)
         parser.add_argument('--pretrained-net',
-                            help='xxx',
+                            help='Load pretrained weights',
                             action='store_true',
                             default=False)
         parser.add_argument('--normalize',
@@ -169,17 +182,13 @@ class Appr(Inc_Learning_Appr):
                             action='store_true',
                             default=False)
         parser.add_argument('--dump',
-                            help='xxx',
+                            help='save checkpoints',
                             action='store_true',
                             default=False)
         parser.add_argument('--rotation',
-                            help='xxx',
+                            help='Rotate images in the first task to enhance feature extractor',
                             action='store_true',
                             default=False)
-        parser.add_argument('--nnet',
-                            type=str,
-                            choices=["resnet8", "resnet14", "resnet20", "resnet32", "resnet18"],
-                            default="resnet18")
         return parser.parse_known_args(args)
 
     def train_loop(self, t, trn_loader, val_loader):
@@ -196,7 +205,7 @@ class Appr(Inc_Learning_Appr):
         self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
         if self.dump:
             torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
-        if t > 0 and self.adaptation_strategy != "no-adapt":
+        if t > 0 and self.adaptation_strategy != "none":
             print("### Adapting prototypes ###")
             self.adapt_distributions(t, trn_loader, val_loader)
         print("### Creating new prototypes ###\n")
@@ -224,6 +233,9 @@ class Appr(Inc_Learning_Appr):
         #     mean = np.mean(sampled_protos_norms[self.task_offset[i]:self.task_offset[i+1]])
         #     sampled_norm_per_task.append(mean)
         # print(f"Norm of pseudoprototypes {sampled_norm_per_task}")
+
+        if self.classifier == "linear":
+            self.train_linear_head(t)
 
         self.check_singular_values(t, val_loader)
         self.print_singular_values()
@@ -452,7 +464,7 @@ class Appr(Inc_Learning_Appr):
         # Adapt
         with torch.no_grad():
             adapter.eval()
-            if self.adaptation_strategy == "mean-only":
+            if self.adaptation_strategy == "mean":
                 self.means = adapter(self.means)
 
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
@@ -584,6 +596,12 @@ class Appr(Inc_Learning_Appr):
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
+    def get_pseudo_head_optimizer(self, parameters, milestones=(15,)):
+        """Returns the optimizer"""
+        optimizer = torch.optim.SGD(parameters, lr=0.1, weight_decay=5e-4, momentum=0.9)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
+        return optimizer, scheduler
+
     @torch.no_grad()
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
@@ -594,23 +612,81 @@ class Appr(Inc_Learning_Appr):
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
             features = self.model(images)
-            if self.is_mahalanobis:
-                if self.is_normalization:
-                    diff = F.normalize(features.unsqueeze(1), p=2, dim=-1) - F.normalize(self.means.unsqueeze(0), p=2, dim=-1)
-                else:
-                    diff = features.unsqueeze(1) - self.means.unsqueeze(0)
-                res = diff.unsqueeze(2) @ self.covs_inverted.unsqueeze(0)
-                res = res @ diff.unsqueeze(3)
-                dist = res.squeeze(2).squeeze(2)
-            else:  # Euclidean
-                dist = torch.cdist(features, self.means)
-            tag_preds = torch.argmin(dist, dim=1)
-            taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
+            if self.classifier == "linear":
+                logits = self.pseudo_head(features)
+                tag_preds = torch.argmax(logits, dim=1)
+                taw_preds = torch.argmax(logits[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
+            else:
+                if self.classifier == "bayes":  # Calcualte mahalanobis distances
+                    if self.is_normalization:
+                        diff = F.normalize(features.unsqueeze(1), p=2, dim=-1) - F.normalize(self.means.unsqueeze(0), p=2, dim=-1)
+                    else:
+                        diff = features.unsqueeze(1) - self.means.unsqueeze(0)
+                    res = diff.unsqueeze(2) @ self.covs_inverted.unsqueeze(0)
+                    res = res @ diff.unsqueeze(3)
+                    dist = res.squeeze(2).squeeze(2)
+                else:  # Euclidean
+                    dist = torch.cdist(features, self.means)
+                tag_preds = torch.argmin(dist, dim=1)
+                taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
 
             tag_acc.update(tag_preds.cpu(), target)
             taw_acc.update(taw_preds.cpu(), target)
 
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
+
+    def train_linear_head(self, t):
+        """ This is alternative to Bayes and NMC classifier """
+        distributions = []
+        for c in range(self.means.shape[0]):
+            cov = self.covs[c].clone()
+            distributions.append(MultivariateNormal(self.means[c], cov))
+        dataset = SampledDataset(distributions, 10000, self.task_offset)
+        trn_loader = torch.utils.data.DataLoader(dataset, batch_size=128, num_workers=0, shuffle=True)
+        # Train the adapter
+        head = nn.Linear(self.S, self.task_offset[-1])
+        head = head.to(self.device)
+        optimizer, lr_scheduler = self.get_pseudo_head_optimizer(head.parameters())
+
+        for epoch in range(30):
+            head.train()
+            train_loss, valid_loss = [], []
+            for features, targets in trn_loader:
+                bsz = features.shape[0]
+                features = features.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
+                optimizer.zero_grad()
+
+                logits = head(features)
+                loss = torch.nn.functional.cross_entropy(logits, targets)
+
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(head.parameters(), 1)
+                optimizer.step()
+                train_loss.append(float(bsz * loss))
+            lr_scheduler.step()
+            train_loss = sum(train_loss) / len(trn_loader.dataset)
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f}")
+
+        with torch.no_grad():
+            head.eval()
+            self.pseudo_head = head
+
+            logits_per_class = torch.zeros((0, self.means.shape[0]), device=self.device)
+            for val_loader in self.val_data_loaders:
+                for images, targets in val_loader:
+                    images = images.to(self.device, non_blocking=True)
+                    features = self.model(images)
+                    logits = self.pseudo_head(features)
+                    logits_per_class = torch.cat((logits_per_class, logits), dim=0)
+
+            logits_per_task = []
+            for i in range(t+1):
+                logits_per_task.append(float(logits_per_class[:, self.task_offset[i]:self.task_offset[i+1]].mean()))
+
+            print(f"Logits per task: {list(logits_per_task)}")
+
+
 
     @torch.no_grad()
     def check_singular_values(self, t, val_loader):
@@ -769,13 +845,10 @@ def compute_rotations(images, targets, total_classes):
 
 
 def loss_singularity(features, beta):
-    # Idea 1 - determinant
     cov = torch.cov(features.T)
-    # det = torch.det(cov)
-    # loss = - torch.log(torch.clamp(torch.abs(det), min=1e-40, max=10))
     cholesky = torch.linalg.cholesky(cov)
     cholesky_diag = torch.diag(cholesky)
     loss = - torch.clamp(cholesky_diag, max=beta).mean()
-    if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
-        return torch.tensor(7777.), torch.tensor(0.)
+    # if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
+    #     return torch.tensor(7777.), torch.tensor(0.)
     return loss, torch.det(cov)
