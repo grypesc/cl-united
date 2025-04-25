@@ -264,12 +264,12 @@ class Appr(Inc_Learning_Appr):
         old_heads = copy.deepcopy(self.heads)
         parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
         parameters_dict = [
-            {"params": list(self.model.parameters())[:-1], "lr": 0.01},
+            {"params": list(self.model.parameters())[:-1], "lr": 0.1 * self.lr if self.pretrained or t > 0 else self.lr},
             {"params": list(criterion.parameters()) + list(self.model.parameters())[-1:]},
             {"params": list(distiller.parameters())},
             {"params": list(self.heads.parameters())},
         ]
-        optimizer, lr_scheduler = self.get_optimizer(parameters_dict if self.pretrained else parameters, t, self.wd)
+        optimizer, lr_scheduler = self.get_optimizer(parameters_dict, t, self.wd)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -584,8 +584,8 @@ class Appr(Inc_Learning_Appr):
         """Returns the optimizer"""
         milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
         lr = self.lr
-        if t > 0:
-            lr *= 0.1
+        # if t > 0 and not self.pretrained:
+        #     lr *= 0.1
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
