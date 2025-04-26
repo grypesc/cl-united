@@ -8,6 +8,7 @@ import torchvision.transforms as transforms
 from torchvision.datasets import MNIST as TorchVisionMNIST
 from torchvision.datasets import CIFAR100 as TorchVisionCIFAR100
 from torchvision.datasets import SVHN as TorchVisionSVHN
+from torchvision.datasets import FGVCAircraft
 
 from . import base_dataset as basedat
 from . import memory_dataset as memd
@@ -162,7 +163,15 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
         _ensure_cub200_subset_prepared(path)
         # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
-                                                                validation=validation, shuffle_classes=class_order is None,
+                                                                validation=validation, shuffle_classes=False,
+                                                                class_order=class_order)
+        Dataset = basedat.BaseDataset
+
+    elif dataset == 'aircraft':
+        _ensure_aircraft_prepared(path)
+        # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
+        all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
+                                                                validation=validation, shuffle_classes=False,
                                                                 class_order=class_order)
         Dataset = basedat.BaseDataset
 
@@ -270,6 +279,19 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ]
+    elif "aircraft" in ds_name.lower():
+        trn_transform_list = [
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                    ]
+        tst_transform_list = [
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ]
       
     # to tensor
     # trn_transform_list.append(transforms.ToTensor())
@@ -287,6 +309,19 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
 
     return transforms.Compose(trn_transform_list), \
            transforms.Compose(tst_transform_list)
+
+
+def _ensure_aircraft_prepared(path):
+    train_ds = FGVCAircraft(path.replace("fgvc-aircraft-2013b", ""), split="trainval")
+    test_ds = FGVCAircraft(path.replace("fgvc-aircraft-2013b", ""), split="test")
+
+    with open(f"{path}/{'train.txt'}", 'wt') as f:
+        for i, image in enumerate(train_ds._image_files):
+            f.write(f"{image.split('fgvc-aircraft-2013b/')[1]} {train_ds._labels[i]}\n")
+
+    with open(f"{path}/{'test.txt'}", 'wt') as f:
+        for i, image in enumerate(test_ds._image_files):
+            f.write(f"{image.split('fgvc-aircraft-2013b/')[1]} {test_ds._labels[i]}\n")
 
 
 def _ensure_imagenet_subset_prepared(path):

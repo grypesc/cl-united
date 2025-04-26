@@ -112,6 +112,13 @@ dataset_config = {
         'crop': 224,
         'flip': True,
         'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    },
+    'aircraft': {
+        'path': join(_BASE_DATA_PATH, "fgvc-aircraft-2013b"),
+        "resize": 256,
+        'crop': 224,
+        'flip': True,
+        'normalize': ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     }
 }
 
