@@ -274,7 +274,7 @@ class Appr(Inc_Learning_Appr):
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
             train_singularity, train_determinant = [], []
-            train_hits, val_hits = 0, 0
+            train_hits, val_hits, train_total, val_total = 0, 0, 0, 0
             self.model.train()
             criterion.train()
             distiller.train()
@@ -283,6 +283,7 @@ class Appr(Inc_Learning_Appr):
                     images, targets = compute_rotations(images, targets, num_classes_in_t)
                 targets -= self.task_offset[t]
                 bsz = images.shape[0]
+                train_total += bsz
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 features = self.model(images)
@@ -324,6 +325,7 @@ class Appr(Inc_Learning_Appr):
                             images, targets = compute_rotations(images, targets, num_classes_in_t)
                         targets -= self.task_offset[t]
                         bsz = images.shape[0]
+                        val_total += bsz
                         images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                         features = self.model(images)
                         loss, logits = criterion(features, targets)
@@ -340,15 +342,17 @@ class Appr(Inc_Learning_Appr):
                             val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                         valid_loss.append(float(bsz * loss))
                         valid_kd_loss.append(float(bsz * kd_loss))
+            else:
+                val_total = 1
 
-            train_loss = sum(train_loss) / len(trn_loader.dataset)
-            train_kd_loss = sum(train_kd_loss) / len(trn_loader.dataset)
+            train_loss = sum(train_loss) / train_total
+            train_kd_loss = sum(train_kd_loss) / train_total
             train_determinant = sum(train_determinant) / len(train_determinant)
-            valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            valid_kd_loss = sum(valid_kd_loss) / len(val_loader.dataset)
+            valid_loss = sum(valid_loss) / val_total
+            valid_kd_loss = sum(valid_kd_loss) / val_total
             train_singularity = sum(train_singularity) / len(train_singularity)
-            train_acc = train_hits / len(trn_loader.dataset)
-            val_acc = val_hits / len(val_loader.dataset)
+            train_acc = train_hits / train_total
+            val_acc = val_hits / val_total
 
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")

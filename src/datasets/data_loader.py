@@ -13,8 +13,6 @@ from torchvision.datasets import FGVCAircraft
 from . import base_dataset as basedat
 from . import memory_dataset as memd
 from .dataset_config import dataset_config
-from .autoaugment import CIFAR10Policy, ImageNetPolicy
-from .ops import Cutout
 
 
 def get_loaders(datasets, num_tasks, nc_first_task, batch_size, num_workers, pin_memory, validation=.1,
@@ -163,16 +161,16 @@ def get_datasets(dataset, path, num_tasks, nc_first_task, validation, trn_transf
         _ensure_cub200_subset_prepared(path)
         # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
-                                                                validation=validation, shuffle_classes=False,
-                                                                class_order=class_order)
+                                                                validation=validation, shuffle_classes=True,
+                                                                class_order=None)
         Dataset = basedat.BaseDataset
 
     elif dataset == 'aircraft':
         _ensure_aircraft_prepared(path)
         # read data paths and compute splits -- path needs to have a train.txt and a test.txt with image-label pairs
         all_data, taskcla, class_indices = basedat.get_data(path, num_tasks=num_tasks, nc_first_task=nc_first_task,
-                                                                validation=validation, shuffle_classes=False,
-                                                                class_order=class_order)
+                                                                validation=validation, shuffle_classes=True,
+                                                                class_order=None)
         Dataset = basedat.BaseDataset
 
     elif dataset == 'domainnet':

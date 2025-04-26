@@ -75,7 +75,7 @@ class ResNet(nn.Module):
             layers.append(block(self.inplanes, planes))
         return nn.Sequential(*layers)
 
-    def forward(self, x, detach_bottleneck=False):
+    def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -85,8 +85,6 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        if detach_bottleneck:
-            x = x.detach()
         x = self.bottleneck(x)
         x = self.avgpool(x).squeeze(2).squeeze(2)
         return x
