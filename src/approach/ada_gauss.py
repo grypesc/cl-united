@@ -273,7 +273,7 @@ class Appr(Inc_Learning_Appr):
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-            train_singularity, train_determinant = [], []
+            train_ac, train_determinant = [], []
             train_hits, val_hits, train_total, val_total = 0, 0, 0, 0
             self.model.train()
             criterion.train()
@@ -300,21 +300,22 @@ class Appr(Inc_Learning_Appr):
                 else:  # no distillation
                     total_loss, kd_loss = loss, 0.
 
-                singularity, det = 0, torch.tensor(0)
+                ac, det = 0, torch.tensor(0)
                 if self.alpha > 0:
-                    singularity, det = loss_singularity(features, self.beta)
-                    total_loss += self.alpha * singularity
+                    ac, det = loss_ac(features, self.beta)
+                    total_loss += self.alpha * ac
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
-                train_singularity.append(float(singularity))
+                train_ac.append(float(ac))
                 train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
+            val_total = 1e-8
             if epoch % 10 == 9:
                 self.model.eval()
                 criterion.eval()
@@ -342,19 +343,17 @@ class Appr(Inc_Learning_Appr):
                             val_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                         valid_loss.append(float(bsz * loss))
                         valid_kd_loss.append(float(bsz * kd_loss))
-            else:
-                val_total = 1
 
             train_loss = sum(train_loss) / train_total
             train_kd_loss = sum(train_kd_loss) / train_total
             train_determinant = sum(train_determinant) / len(train_determinant)
             valid_loss = sum(valid_loss) / val_total
             valid_kd_loss = sum(valid_kd_loss) / val_total
-            train_singularity = sum(train_singularity) / len(train_singularity)
+            train_ac = sum(train_ac) / len(train_ac)
             train_acc = train_hits / train_total
             val_acc = val_hits / val_total
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f} "
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_ac:.3f} Det: {train_determinant:.5f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
         if self.distillation == "logit":
@@ -422,7 +421,7 @@ class Appr(Inc_Learning_Appr):
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
-            train_singularity, train_determinant = [], []
+            train_ac, train_determinant = [], []
             for images, _ in trn_loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
@@ -432,15 +431,15 @@ class Appr(Inc_Learning_Appr):
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
-                singularity, det = 0, torch.tensor(0)
+                ac, det = 0, torch.tensor(0)
                 if self.alpha > 0:
-                    singularity, det = loss_singularity(adapted_features, self.beta)
-                total_loss = loss + self.alpha * singularity
+                    ac, det = loss_ac(adapted_features, self.beta)
+                total_loss = loss + self.alpha * ac
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
-                train_singularity.append(float(singularity))
+                train_ac.append(float(ac))
                 train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
             lr_scheduler.step()
 
@@ -458,9 +457,9 @@ class Appr(Inc_Learning_Appr):
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
             train_determinant = sum(train_determinant) / len(train_determinant)
-            train_singularity = sum(train_singularity) / len(train_singularity)
+            train_ac = sum(train_ac) / len(train_ac)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_singularity:.3f} Det: {train_determinant:.5f}")
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_ac:.3f} Det: {train_determinant:.5f}")
 
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
@@ -848,7 +847,7 @@ def compute_rotations(images, targets, total_classes):
     return images, targets
 
 
-def loss_singularity(features, beta):
+def loss_ac(features, beta):
     cov = torch.cov(features.T)
     cholesky = torch.linalg.cholesky(cov)
     cholesky_diag = torch.diag(cholesky)
