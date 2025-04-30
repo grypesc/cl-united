@@ -41,8 +41,8 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, alpha=0.01, lr_backbone=0.01, beta=1., distillation="projected", use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
-                 adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., shrink_inference=0., multiplier=8, classifier="bayes"):
+                 logger=None, N=10000, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., distillation="projected", use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., shrink_inference=0., multiplier=32, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
                                    exemplars_dataset=None)
@@ -55,6 +55,7 @@ class Appr(Inc_Learning_Appr):
         self.beta = beta
         self.tau = tau
         self.lr_backbone = lr_backbone
+        self.lr_adapter = lr_adapter
         self.multiplier = multiplier
         self.shrink = shrink
         self.shrink_inference = shrink_inference
@@ -117,7 +118,11 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=10)
         parser.add_argument('--lr-backbone',
-                            help='lr for backbone of the pretrained mode;',
+                            help='lr for backbone of the pretrained model',
+                            type=float,
+                            default=0.01)
+        parser.add_argument('--lr-adapter',
+                            help='lr for backbone of the adapter',
                             type=float,
                             default=0.01)
         parser.add_argument('--multiplier',
@@ -154,7 +159,7 @@ class Appr(Inc_Learning_Appr):
                             help='Adapter',
                             type=str,
                             choices=["linear", "mlp"],
-                            default="linear")
+                            default="mlp")
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
@@ -600,7 +605,7 @@ class Appr(Inc_Learning_Appr):
 
     def get_adapter_optimizer(self, parameters, milestones=(30, 60, 90)):
         """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.01, weight_decay=5e-4, momentum=0.9)
+        optimizer = torch.optim.SGD(parameters, lr=self.lr_adapter, weight_decay=5e-4, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
