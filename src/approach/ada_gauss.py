@@ -377,6 +377,7 @@ class Appr(Inc_Learning_Appr):
         new_means = torch.zeros((num_classes_in_t, self.S), device=self.device)
         new_covs = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
         new_covs_not_shrinked = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
+        # svals_task = torch.full((10, self.S), fill_value=0., device=self.device)
         for c in range(num_classes_in_t):
             train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
             if isinstance(trn_loader.dataset.images, list):
@@ -397,6 +398,10 @@ class Appr(Inc_Learning_Appr):
                 class_features[from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
+            # svals = torch.linalg.svdvals(class_features)
+            # torch.sort(svals, descending=True)
+            # svals_task[c] = svals
+
             # Calculate  mean and cov
             new_means[c] = class_features.mean(dim=0)
             new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.shrink)
@@ -407,6 +412,7 @@ class Appr(Inc_Learning_Appr):
             if torch.isnan(new_covs[c]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
+        # np.savetxt("svals_collapse.txt", np.array(svals_task.mean(0).cpu()))
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
         self.covs_raw = torch.cat((self.covs_raw, new_covs_not_shrinked), dim=0)
@@ -491,6 +497,7 @@ class Appr(Inc_Learning_Appr):
                     self.means[c] = adapted_samples.mean(0)
                     # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
                     self.covs[c] = torch.cov(adapted_samples.T)
+                    self.covs[c] = self.shrink_cov(self.covs[c], self.shrink)
                     if self.adaptation_strategy == "diag":
                         self.covs[c] = torch.diag(torch.diag(self.covs[c]))
 
