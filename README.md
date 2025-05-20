@@ -1,4 +1,13 @@
-Run SEED on CIFAR100:
+# AdaGauss repository
+
+Create virtual environment and install dependencies
 ```bash
-python cifar10x10.sh
+python3 -m venv venv
+source venv/bin/activate
+pip install requirements.txt
+```
+
+Reproduce experiments using scripts in scripts:
+```bash
+bash cifar-10x10.sh
 ```
