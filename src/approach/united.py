@@ -41,7 +41,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., distillation="projected", use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., distillation="projected", use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., multiplier=32, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -51,9 +51,9 @@ class Appr(Inc_Learning_Appr):
         self.K = K
         self.S = S
         self.dump = dump
-        self.lamb = lamb
         self.alpha = alpha
         self.beta = beta
+        self.lamb = lamb
         self.tau = tau
         self.lr_backbone = lr_backbone
         self.lr_adapter = lr_adapter
@@ -74,12 +74,10 @@ class Appr(Inc_Learning_Appr):
         for i in range(self.K):
             self.models[i].to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
-        self.means = [torch.empty((0, self.S), device=self.device) for _ in range(self.K)]
-        self.covs = [torch.empty((0, self.S, self.S), device=self.device)  for _ in range(self.K)]
-        self.covs_raw = torch.empty((0, self.S, self.S), device=self.device)  # not shrinked, not adapted
-        self.covs_inverted = None
+        self.means = [torch.empty((self.K, 0, self.S), device=self.device) for _ in range(self.K)]
+        self.covs = [torch.empty((self.K, 0, self.S, self.S), device=self.device) for _ in range(self.K)]
+        self.covs_inverted = [torch.empty((self.K, 0, self.S, self.S), device=self.device) for _ in range(self.K)]
         self.classifier = classifier
-        self.pseudo_head = None
         self.is_normalization = normalize
         self.is_rotation = rotation
         self.task_offset = [0]
@@ -88,7 +86,6 @@ class Appr(Inc_Learning_Appr):
         self.criterion = {"proxy-yolo": ProxyYolo,
                           "proxy-nca": ProxyNCA,
                           "ce": CE}[criterion]
-        self.heads = torch.nn.ModuleList()
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
         self.distiller_type = distiller
@@ -219,7 +216,7 @@ class Appr(Inc_Learning_Appr):
             torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
         if t > 0 and self.adaptation_strategy != "none":
             print("### Adapting prototypes ###")
-            self.adapt_distributions(t, trn_loader, val_loader)
+            self.adapt_distributions_vanilla(t, trn_loader, val_loader)
         print("### Creating new prototypes ###\n")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
 
@@ -233,32 +230,12 @@ class Appr(Inc_Learning_Appr):
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
 
-        # sampled_protos_norms = []
-        # for c in range(self.means.shape[0]):
-        #     cov = self.covs[c].clone()
-        #     distribution = MultivariateNormal(self.means[c], cov)
-        #     samples = distribution.sample((self.N,))
-        #     sampled_protos_norms.append(float(samples.norm(dim=1).mean()))
-        # sampled_protos_norms = np.array(sampled_protos_norms)
-        # sampled_norm_per_task = []
-        # for i in range(len(self.task_offset[:-1])):
-        #     mean = np.mean(sampled_protos_norms[self.task_offset[i]:self.task_offset[i+1]])
-        #     sampled_norm_per_task.append(mean)
-        # print(f"Norm of pseudoprototypes {sampled_norm_per_task}")
-
-        if self.classifier == "linear":
-            self.train_linear_head(t)
-
-        self.check_singular_values(t, val_loader)
-        self.print_singular_values()
-        self.print_covs(trn_loader, val_loader)
-        self.print_mahalanobis(t)
-
     def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
+        model = self.model[t % self.K]
         trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
         val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
-        print(f'The model has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} trainable parameters')
-        print(f'The expert has {sum(p.numel() for p in self.model.parameters() if not p.requires_grad):,} shared parameters\n')
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
+        print(f'The expert has {sum(p.numel() for p in model.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = nn.Linear(self.S, self.S)
         if self.distiller_type == "mlp":
             distiller = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
@@ -272,22 +249,19 @@ class Appr(Inc_Learning_Appr):
             criterion = self.criterion(4*num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
             trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size // 4, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
             val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size // 4, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
-        self.heads.eval()
-        old_heads = copy.deepcopy(self.heads)
-        parameters = list(self.model.parameters()) + list(criterion.parameters()) + list(distiller.parameters()) + list(self.heads.parameters())
+
+        parameters = list(model.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
         parameters_dict = [
-            {"params": list(self.model.parameters())[:-1], "lr": self.lr_backbone},
-            {"params": list(criterion.parameters()) + list(self.model.parameters())[-1:]},
+            {"params": list(model.parameters())[:-1], "lr": self.lr_backbone},
+            {"params": list(criterion.parameters()) + list(model.parameters())[-1:]},
             {"params": list(distiller.parameters())},
-            {"params": list(self.heads.parameters())},
         ]
         optimizer, lr_scheduler = self.get_optimizer(parameters_dict if self.pretrained else parameters, t, self.wd)
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
-            train_ac, train_determinant = [], []
             train_hits, val_hits, train_total, val_total = 0, 0, 0, 0
-            self.model.train()
+            model.train()
             criterion.train()
             distiller.train()
             for images, targets in trn_loader:
@@ -298,13 +272,13 @@ class Appr(Inc_Learning_Appr):
                 train_total += bsz
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
-                features = self.model(images)
+                features = model(images)
                 if epoch < int(self.nepochs * 0.01):
                     features = features.detach()
                 loss, logits = criterion(features, targets)
 
                 if self.distillation == "logit":
-                    total_loss, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
+                    raise NotImplementedError("shiit")
                 elif self.distillation == "projected":
                     total_loss, kd_loss = self.distill_projected(t, loss, features, distiller, images)
                 elif self.distillation == "feature":
@@ -312,24 +286,18 @@ class Appr(Inc_Learning_Appr):
                 else:  # no distillation
                     total_loss, kd_loss = loss, 0.
 
-                ac, det = 0, torch.tensor(0)
-                if self.alpha > 0:
-                    ac, det = loss_ac(features, self.beta)
-                    total_loss += self.alpha * ac
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(parameters, 1)
                 optimizer.step()
                 if logits is not None:
                     train_hits += float(torch.sum((torch.argmax(logits, dim=1) == targets)))
                 train_loss.append(float(bsz * loss))
-                train_ac.append(float(ac))
-                train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
                 train_kd_loss.append(float(bsz * kd_loss))
             lr_scheduler.step()
 
             val_total = 1e-8
             if epoch % 10 == 9:
-                self.model.eval()
+                model.eval()
                 criterion.eval()
                 distiller.eval()
                 with torch.no_grad():
@@ -340,10 +308,10 @@ class Appr(Inc_Learning_Appr):
                         bsz = images.shape[0]
                         val_total += bsz
                         images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
-                        features = self.model(images)
+                        features = model(images)
                         loss, logits = criterion(features, targets)
                         if self.distillation == "logit":
-                            _, kd_loss = self.distill_logits(t, loss, features, images, old_heads)
+                            raise NotImplementedError("life is a bitch")
                         elif self.distillation == "projected":
                             _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
                         elif self.distillation == "feature":
@@ -358,72 +326,21 @@ class Appr(Inc_Learning_Appr):
 
             train_loss = sum(train_loss) / train_total
             train_kd_loss = sum(train_kd_loss) / train_total
-            train_determinant = sum(train_determinant) / len(train_determinant)
             valid_loss = sum(valid_loss) / val_total
             valid_kd_loss = sum(valid_kd_loss) / val_total
-            train_ac = sum(train_ac) / len(train_ac)
             train_acc = train_hits / train_total
             val_acc = val_hits / val_total
 
-            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} Singularity: {train_ac:.3f} Det: {train_determinant:.5f} "
+            print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f}"
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
-        if self.distillation == "logit":
-            self.heads.append(criterion.head)
-
-    @torch.no_grad()
-    def create_distributions(self, t, trn_loader, val_loader, num_classes_in_t):
-        """ Creating distributions for task t"""
-        self.model.eval()
-        transforms = val_loader.dataset.transform
-        new_means = torch.zeros((num_classes_in_t, self.S), device=self.device)
-        new_covs = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
-        new_covs_not_shrinked = torch.zeros((num_classes_in_t, self.S, self.S), device=self.device)
-        # svals_task = torch.full((10, self.S), fill_value=0., device=self.device)
-        for c in range(num_classes_in_t):
-            train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
-            if isinstance(trn_loader.dataset.images, list):
-                train_images = list(compress(trn_loader.dataset.images, train_indices))
-                ds = ClassDirectoryDataset(train_images, transforms)
-            else:
-                ds = trn_loader.dataset.images[train_indices]
-                ds = ClassMemoryDataset(ds, transforms)
-            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
-            from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
-            for images in loader:
-                bsz = images.shape[0]
-                images = images.to(self.device, non_blocking=True)
-                features = self.model(images)
-                class_features[from_: from_+bsz] = features
-                features = self.model(torch.flip(images, dims=(3,)))
-                class_features[from_+bsz: from_+2*bsz] = features
-                from_ += 2*bsz
-
-            # svals = torch.linalg.svdvals(class_features)
-            # torch.sort(svals, descending=True)
-            # svals_task[c] = svals
-
-            # Calculate  mean and cov
-            new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.shrink)
-            new_covs_not_shrinked[c] = torch.cov(class_features.T)
-            if self.adaptation_strategy == "diag":
-                new_covs[c] = torch.diag(torch.diag(new_covs[c]))
-
-            if torch.isnan(new_covs[c]).any():
-                raise RuntimeError(f"Nan in covariance matrix of class {c}")
-
-        # np.savetxt("svals_collapse.txt", np.array(svals_task.mean(0).cpu()))
-        self.means = torch.cat((self.means, new_means), dim=0)
-        self.covs = torch.cat((self.covs, new_covs), dim=0)
-        self.covs_raw = torch.cat((self.covs_raw, new_covs_not_shrinked), dim=0)
-
-    def adapt_distributions(self, t, trn_loader, val_loader):
+    def adapt_distributions_vanilla(self, t, trn_loader, val_loader):
+        expert_to_train = t % self.K
+        model = self.model[expert_to_train]
         trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
         val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         # Train the adapter
-        self.model.eval()
+        model.eval()
         adapter = nn.Linear(self.S, self.S)
         if self.adapter_type == "mlp":
             adapter = nn.Sequential(nn.Linear(self.S, self.multiplier * self.S),
@@ -439,26 +356,19 @@ class Appr(Inc_Learning_Appr):
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
-            train_ac, train_determinant = [], []
             for images, _ in trn_loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 with torch.no_grad():
-                    target = self.model(images)
+                    target = model(images)
                     old_features = self.old_model(images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
-                ac, det = 0, torch.tensor(0)
-                if self.alpha > 0:
-                    ac, det = loss_ac(adapted_features, self.beta)
-                total_loss = loss + self.alpha * ac
-                total_loss.backward()
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
                 optimizer.step()
                 train_loss.append(float(bsz * loss))
-                train_ac.append(float(ac))
-                train_determinant.append(float(torch.clamp(torch.abs(det), max=1e8)))
             lr_scheduler.step()
 
             if epoch % 10 == 9:
@@ -467,17 +377,15 @@ class Appr(Inc_Learning_Appr):
                     for images, _ in val_loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
-                        target = self.model(images)
+                        target = model(images)
                         old_features = self.old_model(images)
                         adapted_features = adapter(old_features)
                         total_loss = torch.nn.functional.mse_loss(adapted_features, target)
                         valid_loss.append(float(bsz * total_loss))
 
             train_loss = sum(train_loss) / len(trn_loader.dataset)
-            train_determinant = sum(train_determinant) / len(train_determinant)
-            train_ac = sum(train_ac) / len(train_ac)
             valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f} Singularity: {train_ac:.3f} Det: {train_determinant:.5f}")
+            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f}")
 
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
@@ -486,7 +394,7 @@ class Appr(Inc_Learning_Appr):
         with torch.no_grad():
             adapter.eval()
             if self.adaptation_strategy == "mean":
-                self.means = adapter(self.means)
+                self.means[expert_to_train] = adapter(self.means)
 
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[0]):
@@ -498,10 +406,10 @@ class Appr(Inc_Learning_Appr):
                     adapted_samples = adapter(samples)
                     self.means[c] = adapted_samples.mean(0)
                     # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
-                    self.covs[c] = torch.cov(adapted_samples.T)
-                    self.covs[c] = self.shrink_cov(self.covs[c], self.shrink)
+                    self.covs[expert_to_train][c] = torch.cov(adapted_samples.T)
+                    self.covs[expert_to_train][c] = self.shrink_cov(self.covs[c], self.shrink)
                     if self.adaptation_strategy == "diag":
-                        self.covs[c] = torch.diag(torch.diag(self.covs[c]))
+                        self.covs[expert_to_train][c] = torch.diag(torch.diag(self.covs[c]))
 
             print("### Adaptation evaluation ###")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
@@ -525,9 +433,9 @@ class Appr(Inc_Learning_Appr):
                     for images in loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
-                        features = self.model(images)
+                        features = model(images)
                         class_features[from_: from_+bsz] = features
-                        features = self.model(torch.flip(images, dims=(3,)))
+                        features = model(torch.flip(images, dims=(3,)))
                         class_features[from_+bsz: from_+2*bsz] = features
                         from_ += 2*bsz
 
@@ -570,6 +478,54 @@ class Appr(Inc_Learning_Appr):
                 print(f"New {subset} KLD: {new_kld.mean():.2f} ± {new_kld.std():.2f}")
                 print("")
 
+    @torch.no_grad()
+    def create_distributions(self, t, trn_loader, val_loader, num_classes_in_t):
+        """ Creating distributions for task t"""
+        self.models.eval()
+        transforms = val_loader.dataset.transform
+        new_means = torch.zeros((self.K, num_classes_in_t, self.S), device=self.device)
+        new_covs = torch.zeros((self.K, num_classes_in_t, self.S, self.S), device=self.device)
+        new_covs_not_shrinked = torch.zeros((self.K, num_classes_in_t, self.S, self.S), device=self.device)
+        # svals_task = torch.full((10, self.S), fill_value=0., device=self.device)
+        for c in range(num_classes_in_t):
+            train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
+            if isinstance(trn_loader.dataset.images, list):
+                train_images = list(compress(trn_loader.dataset.images, train_indices))
+                ds = ClassDirectoryDataset(train_images, transforms)
+            else:
+                ds = trn_loader.dataset.images[train_indices]
+                ds = ClassMemoryDataset(ds, transforms)
+            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+            from_ = 0
+            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
+            for images in loader:
+                bsz = images.shape[0]
+                images = images.to(self.device, non_blocking=True)
+                features = self.model(images)
+                class_features[from_: from_+bsz] = features
+                features = self.model(torch.flip(images, dims=(3,)))
+                class_features[from_+bsz: from_+2*bsz] = features
+                from_ += 2*bsz
+
+            # svals = torch.linalg.svdvals(class_features)
+            # torch.sort(svals, descending=True)
+            # svals_task[c] = svals
+
+            # Calculate  mean and cov
+            new_means[c] = class_features.mean(dim=0)
+            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.shrink)
+            new_covs_not_shrinked[c] = torch.cov(class_features.T)
+            if self.adaptation_strategy == "diag":
+                new_covs[c] = torch.diag(torch.diag(new_covs[c]))
+
+            if torch.isnan(new_covs[c]).any():
+                raise RuntimeError(f"Nan in covariance matrix of class {c}")
+
+        # np.savetxt("svals_collapse.txt", np.array(svals_task.mean(0).cpu()))
+        self.means = torch.cat((self.means, new_means), dim=0)
+        self.covs = torch.cat((self.covs, new_covs), dim=0)
+        self.covs_raw = torch.cat((self.covs_raw, new_covs_not_shrinked), dim=0)
+
     def distill_projected(self, t, loss, features, distiller, images):
         """ Projected distillation through the distiller"""
         if t == 0:
@@ -590,18 +546,6 @@ class Appr(Inc_Learning_Appr):
         total_loss = loss + self.lamb * kd_loss
         return total_loss, kd_loss
 
-    def distill_logits(self, t, loss, features, images, old_heads):
-        """ Projected distillation through the distiller"""
-        if t == 0:
-            return loss, 0
-        with torch.no_grad():
-            old_features = self.old_model(images)
-            old_logits = torch.cat([head(old_features) for head in old_heads], dim=1)
-        new_logits = torch.cat([head(features) for head in self.heads], dim=1)
-        kd_loss = self.cross_entropy(new_logits, old_logits, exp=1 / self.tau)
-        total_loss = loss + self.lamb * kd_loss
-        return total_loss, kd_loss
-
     def get_optimizer(self, parameters, t, wd):
         """Returns the optimizer"""
         milestones = (int(0.3*self.nepochs), int(0.6*self.nepochs), int(0.9*self.nepochs))
@@ -618,11 +562,6 @@ class Appr(Inc_Learning_Appr):
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
 
-    def get_pseudo_head_optimizer(self, parameters, milestones=(15,)):
-        """Returns the optimizer"""
-        optimizer = torch.optim.SGD(parameters, lr=0.1, weight_decay=5e-4, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
-        return optimizer, scheduler
 
     @torch.no_grad()
     def eval(self, t, val_loader):
@@ -657,86 +596,6 @@ class Appr(Inc_Learning_Appr):
 
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
 
-    def train_linear_head(self, t):
-        """ This is alternative to Bayes and NMC classifier """
-        distributions = []
-        for c in range(self.means.shape[0]):
-            cov = self.covs[c].clone()
-            distributions.append(MultivariateNormal(self.means[c], cov))
-        dataset = SampledDataset(distributions, 10000, self.task_offset)
-        trn_loader = torch.utils.data.DataLoader(dataset, batch_size=128, num_workers=0, shuffle=True)
-        # Train the adapter
-        head = nn.Linear(self.S, self.task_offset[-1])
-        head = head.to(self.device)
-        optimizer, lr_scheduler = self.get_pseudo_head_optimizer(head.parameters())
-
-        for epoch in range(30):
-            head.train()
-            train_loss, valid_loss = [], []
-            for features, targets in trn_loader:
-                bsz = features.shape[0]
-                features = features.to(self.device, non_blocking=True)
-                targets = targets.to(self.device, non_blocking=True)
-                optimizer.zero_grad()
-
-                logits = head(features)
-                loss = torch.nn.functional.cross_entropy(logits, targets)
-
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(head.parameters(), 1)
-                optimizer.step()
-                train_loss.append(float(bsz * loss))
-            lr_scheduler.step()
-            train_loss = sum(train_loss) / len(trn_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f}")
-
-        with torch.no_grad():
-            head.eval()
-            self.pseudo_head = head
-
-            logits_per_class = torch.zeros((0, self.means.shape[0]), device=self.device)
-            for val_loader in self.val_data_loaders:
-                for images, targets in val_loader:
-                    images = images.to(self.device, non_blocking=True)
-                    features = self.model(images)
-                    logits = self.pseudo_head(features)
-                    logits_per_class = torch.cat((logits_per_class, logits), dim=0)
-
-            logits_per_task = []
-            for i in range(t+1):
-                logits_per_task.append(float(logits_per_class[:, self.task_offset[i]:self.task_offset[i+1]].mean()))
-
-            print(f"Logits per task: {list(logits_per_task)}")
-
-
-
-    @torch.no_grad()
-    def check_singular_values(self, t, val_loader):
-        self.model.eval()
-        self.svals_explained_by.append([])
-        for i, _ in enumerate(self.train_data_loaders):
-            if isinstance(self.train_data_loaders[i].dataset.images, list):
-                train_images = self.train_data_loaders[i].dataset.images
-                ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
-            else:
-                ds = ClassMemoryDataset(self.train_data_loaders[i].dataset.images, val_loader.dataset.transform)
-
-            loader = torch.utils.data.DataLoader(ds, batch_size=256, num_workers=val_loader.num_workers, shuffle=False)
-            from_ = 0
-            class_features = torch.full((len(ds), self.S), fill_value=-999999999.0, device=self.device)
-            for images in loader:
-                bsz = images.shape[0]
-                images = images.to(self.device, non_blocking=True)
-                features = self.model(images)
-                class_features[from_: from_ + bsz] = features
-                from_ += bsz
-
-            cov = torch.cov(class_features.T)
-            svals = torch.linalg.svdvals(cov)
-            xd = torch.cumsum(svals, 0)
-            xd = xd[xd < self.sval_fraction * torch.sum(svals)]
-            explain = xd.shape[0]
-            self.svals_explained_by[t].append(explain)
 
     @torch.no_grad()
     def print_singular_values(self):
@@ -761,101 +620,6 @@ class Appr(Inc_Learning_Appr):
         cov = cov / (std.unsqueeze(2) @ std.unsqueeze(1))
         return cov
 
-    def cross_entropy(self, outputs, targets, exp=1.0, size_average=True, eps=1e-5):
-        """Calculates cross-entropy with temperature scaling"""
-        out = torch.nn.functional.softmax(outputs, dim=1)
-        tar = torch.nn.functional.softmax(targets, dim=1)
-        if exp != 1:
-            out = out.pow(exp)
-            out = out / out.sum(1).view(-1, 1).expand_as(out)
-            tar = tar.pow(exp)
-            tar = tar / tar.sum(1).view(-1, 1).expand_as(tar)
-        out = out + eps / out.size(1)
-        out = out / out.sum(1).view(-1, 1).expand_as(out)
-        ce = -(tar * out.log()).sum(1)
-        if size_average:
-            ce = ce.mean()
-        return ce
-
-    @torch.no_grad()
-    def print_covs(self, trn_loader, val_loader):
-        self.model.eval()
-        print("### Norms per task: ###")
-        gt_means, gt_covs, gt_inverted_covs = [], [], []
-        class_images = np.concatenate([dl.dataset.images for dl in self.train_data_loaders])
-        labels = np.concatenate([dl.dataset.labels for dl in self.train_data_loaders])
-
-        # Calculate ground truth
-        for c in list(np.unique(labels)):
-            train_indices = torch.tensor(labels) == c
-
-            if isinstance(trn_loader.dataset.images, list):
-                train_images = list(compress(class_images, train_indices))
-                ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
-            else:
-                ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
-            loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
-            from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
-            for images in loader:
-                bsz = images.shape[0]
-                images = images.to(self.device, non_blocking=True)
-                features = self.model(images)
-                class_features[from_: from_ + bsz] = features
-                features = self.model(torch.flip(images, dims=(3,)))
-                class_features[from_ + bsz: from_ + 2 * bsz] = features
-                from_ += 2 * bsz
-
-            gt_means.append(class_features.mean(0))
-            cov = torch.cov(class_features.T)
-            gt_covs.append(cov)
-            gt_inverted_covs.append(torch.inverse(self.shrink_cov(cov, self.shrink)))
-
-        gt_means = torch.stack(gt_means)
-        gt_covs = torch.stack(gt_covs)
-        gt_inverted_covs = torch.stack(gt_inverted_covs)
-
-        # Calculate statistics per task
-        mean_norms, cov_norms = [], []
-        gt_mean_norms, gt_cov_norms = [], []
-        inverted_cov_norms, gt_inverted_cov_norms = [], []
-        for task in range(len(self.task_offset[1:])):
-            from_ = self.task_offset[task]
-            to_ = self.task_offset[task + 1]
-            mean_norms.append(round(float(torch.norm(self.means[from_:to_], dim=1).mean()), 2))
-            cov_norms.append(round(float(torch.linalg.matrix_norm(self.covs[from_:to_]).mean()), 2))
-            inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(torch.inverse(self.covs[from_:to_])).mean()), 2))  # no shrink, no norm!
-            gt_mean_norms.append(round(float(torch.norm(gt_means[from_:to_], dim=1).mean()), 2))
-            gt_cov_norms.append(round(float(torch.linalg.matrix_norm(gt_covs[from_:to_]).mean()), 2))
-            gt_inverted_cov_norms.append(round(float(torch.linalg.matrix_norm(gt_inverted_covs[from_:to_]).mean()), 2))
-        print(f"Means: {mean_norms}")
-        print(f"GT Means: {gt_mean_norms}")
-        print(f"Covs: {cov_norms}")
-        print(f"GT Covs: {gt_cov_norms}")
-        print(f"Inverted Covs: {inverted_cov_norms}")
-        print(f"GT Inverted Covs: {gt_inverted_cov_norms}")
-
-    @torch.no_grad()
-    def print_mahalanobis(self, t):
-        self.model.eval()
-        mahalanobis_per_class = torch.zeros((0, self.means.shape[0]), device=self.device)
-        for val_loader in self.val_data_loaders:
-            for images, targets in val_loader:
-                images = images.to(self.device, non_blocking=True)
-                features = self.model(images)
-
-                diff = features.unsqueeze(1) - self.means.unsqueeze(0)
-                res = diff.unsqueeze(2) @ self.covs_inverted.unsqueeze(0)
-                res = res @ diff.unsqueeze(3)
-                dist = res.squeeze(2).squeeze(2)
-                mahalanobis_per_class = torch.cat((mahalanobis_per_class, dist), dim=0)
-
-        mahalanobis_per_task = []
-        for i in range(t+1):
-            mahalanobis_per_task.append(float(mahalanobis_per_class[:, self.task_offset[i]:self.task_offset[i+1]].mean()))
-
-        print(f"Mahalanobis per task: {list(mahalanobis_per_task)}")
-
 
 def compute_rotations(images, targets, total_classes):
     # compute self-rotation for the first task following PASS https://github.com/Impression2805/CVPR21_PASS
@@ -865,12 +629,3 @@ def compute_rotations(images, targets, total_classes):
     targets = torch.cat((targets, target_rot))
     return images, targets
 
-
-def loss_ac(features, beta):
-    cov = torch.cov(features.T)
-    cholesky = torch.linalg.cholesky(cov)
-    cholesky_diag = torch.diag(cholesky)
-    loss = - torch.clamp(cholesky_diag, max=beta).mean()
-    # if bool(torch.isinf(loss)) or bool(torch.isnan(loss)):
-    #     return torch.tensor(7777.), torch.tensor(0.)
-    return loss, torch.det(cov)
