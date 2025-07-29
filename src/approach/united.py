@@ -62,6 +62,7 @@ class Appr(Inc_Learning_Appr):
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_model = None
+        self.model = None
         self.models = nn.ModuleList([resnet18(num_features=S, is_224=use_224) for _ in range(self.K)])
         self.pretrained = pretrained_net
         if pretrained_net:
@@ -139,7 +140,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--shrink',
                             help='shrink during inference',
                             type=float,
-                            default=0)
+                            default=1.0)
         parser.add_argument('--sval-fraction',
                             help='Fraction of eigenvalues sum that is explained',
                             type=float,
@@ -189,7 +190,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--normalize',
                             help='xxx',
                             action='store_true',
-                            default=False)
+                            default=True)
         parser.add_argument('--dump',
                             help='save checkpoints',
                             action='store_true',
@@ -211,9 +212,14 @@ class Appr(Inc_Learning_Appr):
         print("### Training backbone ###")
         # state_dict = torch.load(f"../ckpts/model_{t}.pth")
         # self.model.load_state_dict(state_dict, strict=True)
-        self.train_backbone(t, trn_loader, val_loader, num_classes_in_t)
+
+        # In the first task train all experts
+        expert_to_train = t % self.K
+        if t == 0:
+            for m in self.models:
+                self.train_expert(t, expert_to_train, trn_loader, val_loader, num_classes_in_t)
         if self.dump:
-            torch.save(self.model.state_dict(), f"{self.logger.exp_path}/model_{t}.pth")
+            torch.save(self.models.state_dict(), f"{self.logger.exp_path}/models_{t}.pth")
         if t > 0 and self.adaptation_strategy != "none":
             print("### Adapting prototypes ###")
             self.adapt_distributions_vanilla(t, trn_loader, val_loader)
@@ -230,8 +236,7 @@ class Appr(Inc_Learning_Appr):
             covs = self.norm_cov(covs)
         self.covs_inverted = torch.inverse(covs)
 
-    def train_backbone(self, t, trn_loader, val_loader, num_classes_in_t):
-        model = self.model[t % self.K]
+    def train_expert(self, t, model, trn_loader, val_loader, num_classes_in_t):
         trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
         val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         print(f'The expert has {sum(p.numel() for p in model.parameters() if p.requires_grad):,} trainable parameters')
@@ -394,11 +399,11 @@ class Appr(Inc_Learning_Appr):
         with torch.no_grad():
             adapter.eval()
             if self.adaptation_strategy == "mean":
-                self.means[expert_to_train] = adapter(self.means)
+                self.means[expert_to_train] = adapter(self.means[expert_to_train])
 
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
-                for c in range(self.means.shape[0]):
-                    cov = self.covs[c].clone()
+                for c in range(self.means.shape[1]):
+                    cov = self.covs[expert_to_train, c].clone()
                     distribution = MultivariateNormal(self.means[c], cov)
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
@@ -409,7 +414,7 @@ class Appr(Inc_Learning_Appr):
                     self.covs[expert_to_train][c] = torch.cov(adapted_samples.T)
                     self.covs[expert_to_train][c] = self.shrink_cov(self.covs[c], self.shrink)
                     if self.adaptation_strategy == "diag":
-                        self.covs[expert_to_train][c] = torch.diag(torch.diag(self.covs[c]))
+                        self.covs[expert_to_train][c] = torch.diag(torch.diag(self.covs[expert_to_train, c]))
 
             print("### Adaptation evaluation ###")
             for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
@@ -497,14 +502,15 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
             from_ = 0
-            class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
+            class_features = torch.full((self.K, 2 * len(ds), self.S), fill_value=0., device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
-                features = self.model(images)
-                class_features[from_: from_+bsz] = features
-                features = self.model(torch.flip(images, dims=(3,)))
-                class_features[from_+bsz: from_+2*bsz] = features
+                for expert_num, model in enumerate(self.models):
+                    features = model(images)
+                    class_features[expert_num, from_: from_+bsz] = features
+                    features = model(torch.flip(images, dims=(3,)))
+                    class_features[expert_num, from_+bsz: from_+2*bsz] = features
                 from_ += 2*bsz
 
             # svals = torch.linalg.svdvals(class_features)
@@ -512,9 +518,8 @@ class Appr(Inc_Learning_Appr):
             # svals_task[c] = svals
 
             # Calculate  mean and cov
-            new_means[c] = class_features.mean(dim=0)
-            new_covs[c] = self.shrink_cov(torch.cov(class_features.T), self.shrink)
-            new_covs_not_shrinked[c] = torch.cov(class_features.T)
+            new_means[:, c] = class_features.mean(dim=1)
+            new_covs[:, c] = self.shrink_cov(torch.cov(class_features.T), self.shrink)
             if self.adaptation_strategy == "diag":
                 new_covs[c] = torch.diag(torch.diag(new_covs[c]))
 
@@ -522,9 +527,8 @@ class Appr(Inc_Learning_Appr):
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
         # np.savetxt("svals_collapse.txt", np.array(svals_task.mean(0).cpu()))
-        self.means = torch.cat((self.means, new_means), dim=0)
-        self.covs = torch.cat((self.covs, new_covs), dim=0)
-        self.covs_raw = torch.cat((self.covs_raw, new_covs_not_shrinked), dim=0)
+        self.means = torch.cat((self.means, new_means), dim=1)
+        self.covs = torch.cat((self.covs, new_covs), dim=1)
 
     def distill_projected(self, t, loss, features, distiller, images):
         """ Projected distillation through the distiller"""
