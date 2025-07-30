@@ -329,7 +329,7 @@ class Appr(Inc_Learning_Appr):
                         if self.distillation == "logit":
                             raise NotImplementedError("life is a bitch")
                         elif self.distillation == "projected":
-                            _, kd_loss = self.distill_projected(t, loss, features, distiller, images)
+                            _, kd_loss = self.distill_projected_vanilla(t, expert_to_train, loss, features, distiller, images)
                         elif self.distillation == "feature":
                             _, kd_loss = self.distill_features(t, loss, features, images)
                         else:  # no distillation
@@ -366,8 +366,6 @@ class Appr(Inc_Learning_Appr):
         # state_dict = torch.load(f"../ckpts/adapter_{t}.pth")
         # adapter.load_state_dict(state_dict, strict=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
-        old_means = copy.deepcopy(self.means)
-        old_covs = copy.deepcopy(self.covs)
         for epoch in range(self.nepochs // 2):
             adapter.train()
             train_loss, valid_loss = [], []
@@ -503,8 +501,7 @@ class Appr(Inc_Learning_Appr):
         transforms = val_loader.dataset.transform
         new_means = torch.zeros((self.K, num_classes_in_t, self.S), device=self.device)
         new_covs = torch.zeros((self.K, num_classes_in_t, self.S, self.S), device=self.device)
-        new_covs_not_shrinked = torch.zeros((self.K, num_classes_in_t, self.S, self.S), device=self.device)
-        # svals_task = torch.full((10, self.S), fill_value=0., device=self.device)
+
         for c in range(num_classes_in_t):
             train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
             if isinstance(trn_loader.dataset.images, list):
