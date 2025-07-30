@@ -78,6 +78,8 @@ class Appr(Inc_Learning_Appr):
         self.means = torch.empty((self.K, 0, self.S), device=self.device)
         self.covs = torch.empty((self.K, 0, self.S, self.S), device=self.device)
         self.covs_inverted = None
+        self.old_means = None
+        self.old_covs = None
         self.classifier = classifier
         self.is_normalization = normalize
         self.is_rotation = rotation
@@ -207,6 +209,8 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
         self.old_models = copy.deepcopy(self.models)
+        self.old_means = copy.deepcopy(self.means)
+        self.old_covs = copy.deepcopy(self.covs)
         self.old_models.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
@@ -226,6 +230,7 @@ class Appr(Inc_Learning_Appr):
         if t > 0 and self.adaptation_strategy != "none":
             print("### Adapting gausses ###")
             self.adapt_distributions_vanilla(t, expert_to_train, trn_loader, val_loader)
+            self.evaluate_adaptation(t, expert_to_train, trn_loader, val_loader)
         print("### Creating new gausses ###\n")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
 
@@ -422,9 +427,10 @@ class Appr(Inc_Learning_Appr):
                         self.covs[expert_to_train, c] = torch.diag(torch.diag(self.covs[expert_to_train, c]))
 
     @torch.no_grad()
-    def evaluate_adaptation(self):
+    def evaluate_adaptation(self, t, expert_trained, trn_loader, val_loader):
         print("### Evaluating adaptation ###")
         for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
+            model = self.models[expert_trained]
             old_mean_diff, new_mean_diff = [], []
             old_kld, new_kld = [], []
             old_cov_diff, old_cov_norm_diff, new_cov_diff, new_cov_norm_diff = [], [], [], []
@@ -459,16 +465,16 @@ class Appr(Inc_Learning_Appr):
                     gt_cov = torch.diag(torch.diag(gt_cov))
 
                 # Calculate old diffs
-                old_mean_diff.append((gt_mean - old_means[c]).norm())
-                old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
-                old_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(old_covs[c].unsqueeze(0))))
-                old_gauss = torch.distributions.MultivariateNormal(old_means[c], old_covs[c])
+                old_mean_diff.append((gt_mean - self.old_means[expert_trained, c]).norm())
+                old_cov_diff.append(torch.norm(gt_cov - self.old_covs[expert_trained, c]))
+                old_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.old_covs[expert_trained, c].unsqueeze(0))))
+                old_gauss = torch.distributions.MultivariateNormal(self.old_means[expert_trained, c], self.old_covs[expert_trained, c])
                 old_kld.append(torch.distributions.kl_divergence(old_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, old_gauss))
                 # Calculate new diffs
-                new_mean_diff.append((gt_mean - self.means[c]).norm())
-                new_cov_diff.append(torch.norm(gt_cov - self.covs[c]))
-                new_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.covs[c].unsqueeze(0))))
-                new_gauss = torch.distributions.MultivariateNormal(self.means[c], self.covs[c])
+                new_mean_diff.append((gt_mean - self.means[expert_trained, c]).norm())
+                new_cov_diff.append(torch.norm(gt_cov - self.covs[expert_trained, c]))
+                new_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.covs[expert_trained, c].unsqueeze(0))))
+                new_gauss = torch.distributions.MultivariateNormal(self.means[expert_trained, c], self.covs[expert_trained, c])
                 new_kld.append(torch.distributions.kl_divergence(new_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, new_gauss))
 
             old_mean_diff = torch.stack(old_mean_diff)
