@@ -225,7 +225,7 @@ class Appr(Inc_Learning_Appr):
             torch.save(self.models.state_dict(), f"{self.logger.exp_path}/models_{t}.pth")
         if t > 0 and self.adaptation_strategy != "none":
             print("### Adapting gausses ###")
-            self.adapt_distributions_vanilla(t, trn_loader, val_loader)
+            self.adapt_distributions_vanilla(t, expert_to_train, trn_loader, val_loader)
         print("### Creating new gausses ###\n")
         self.create_distributions(t, trn_loader, val_loader, num_classes_in_t)
 
@@ -345,9 +345,8 @@ class Appr(Inc_Learning_Appr):
             print(f"Epoch: {epoch} Train: {train_loss:.2f} KD: {train_kd_loss:.3f} Acc: {100 * train_acc:.2f} "
                   f"Val: {valid_loss:.2f} KD: {valid_kd_loss:.3f} Acc: {100 * val_acc:.2f}")
 
-    def adapt_distributions_vanilla(self, t, trn_loader, val_loader):
-        expert_to_train = t % self.K
-        model = self.model[expert_to_train]
+    def adapt_distributions_vanilla(self, t, expert_to_train, trn_loader, val_loader):
+        model = self.models[expert_to_train]
         trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
         val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         # Train the adapter
@@ -373,7 +372,7 @@ class Appr(Inc_Learning_Appr):
                 optimizer.zero_grad()
                 with torch.no_grad():
                     target = model(images)
-                    old_features = self.old_model(images)
+                    old_features = self.old_models[expert_to_train](images)
                 adapted_features = adapter(old_features)
                 loss = torch.nn.functional.mse_loss(adapted_features, target)
                 loss.backward()
@@ -389,7 +388,7 @@ class Appr(Inc_Learning_Appr):
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
                         target = model(images)
-                        old_features = self.old_model(images)
+                        old_features = self.old_models[expert_to_train](images)
                         adapted_features = adapter(old_features)
                         total_loss = torch.nn.functional.mse_loss(adapted_features, target)
                         valid_loss.append(float(bsz * total_loss))
@@ -401,7 +400,7 @@ class Appr(Inc_Learning_Appr):
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
 
-        # Adapt
+        # Adaptation
         with torch.no_grad():
             adapter.eval()
             if self.adaptation_strategy == "mean":
@@ -410,84 +409,86 @@ class Appr(Inc_Learning_Appr):
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[1]):
                     cov = self.covs[expert_to_train, c].clone()
-                    distribution = MultivariateNormal(self.means[c], cov)
+                    distribution = MultivariateNormal(self.means[expert_to_train, c], cov)
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
                         raise RuntimeError(f"Nan in features sampled for class {c}")
                     adapted_samples = adapter(samples)
-                    self.means[c] = adapted_samples.mean(0)
+                    self.means[expert_to_train, c] = adapted_samples.mean(0)
                     # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
-                    self.covs[expert_to_train][c] = torch.cov(adapted_samples.T)
-                    self.covs[expert_to_train][c] = self.shrink_cov(self.covs[c], self.shrink)
+                    self.covs[expert_to_train, c] = torch.cov(adapted_samples.T)
+                    self.covs[expert_to_train, c] = self.shrink_cov(self.covs[expert_to_train, c], self.shrink)
                     if self.adaptation_strategy == "diag":
-                        self.covs[expert_to_train][c] = torch.diag(torch.diag(self.covs[expert_to_train, c]))
+                        self.covs[expert_to_train, c] = torch.diag(torch.diag(self.covs[expert_to_train, c]))
 
-            print("### Adaptation evaluation ###")
-            for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
-                old_mean_diff, new_mean_diff = [], []
-                old_kld, new_kld = [], []
-                old_cov_diff, old_cov_norm_diff, new_cov_diff, new_cov_norm_diff = [], [], [], []
-                class_images = np.concatenate([dl.dataset.images for dl in loaders[-2:-1]])
-                labels = np.concatenate([dl.dataset.labels for dl in loaders[-2:-1]])
+    @torch.no_grad()
+    def evaluate_adaptation(self):
+        print("### Evaluating adaptation ###")
+        for (subset, loaders) in [("train", self.train_data_loaders), ("val", self.val_data_loaders)]:
+            old_mean_diff, new_mean_diff = [], []
+            old_kld, new_kld = [], []
+            old_cov_diff, old_cov_norm_diff, new_cov_diff, new_cov_norm_diff = [], [], [], []
+            class_images = np.concatenate([dl.dataset.images for dl in loaders[-2:-1]])
+            labels = np.concatenate([dl.dataset.labels for dl in loaders[-2:-1]])
 
-                for c in list(np.unique(labels)):
-                    train_indices = torch.tensor(labels) == c
+            for c in list(np.unique(labels)):
+                train_indices = torch.tensor(labels) == c
 
-                    if isinstance(trn_loader.dataset.images, list):
-                        train_images = list(compress(class_images, train_indices))
-                        ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
-                    else:
-                        ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
-                    loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
-                    from_ = 0
-                    class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
-                    for images in loader:
-                        bsz = images.shape[0]
-                        images = images.to(self.device, non_blocking=True)
-                        features = model(images)
-                        class_features[from_: from_+bsz] = features
-                        features = model(torch.flip(images, dims=(3,)))
-                        class_features[from_+bsz: from_+2*bsz] = features
-                        from_ += 2*bsz
+                if isinstance(trn_loader.dataset.images, list):
+                    train_images = list(compress(class_images, train_indices))
+                    ds = ClassDirectoryDataset(train_images, val_loader.dataset.transform)
+                else:
+                    ds = ClassMemoryDataset(class_images[train_indices], val_loader.dataset.transform)
+                loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
+                from_ = 0
+                class_features = torch.full((2 * len(ds), self.S), fill_value=0., device=self.device)
+                for images in loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device, non_blocking=True)
+                    features = model(images)
+                    class_features[from_: from_+bsz] = features
+                    features = model(torch.flip(images, dims=(3,)))
+                    class_features[from_+bsz: from_+2*bsz] = features
+                    from_ += 2*bsz
 
-                    gt_mean = class_features.mean(0)
-                    gt_cov = torch.cov(class_features.T)
-                    gt_cov = self.shrink_cov(gt_cov, self.shrink)
-                    gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
-                    if self.adaptation_strategy == "diag":
-                        gt_cov = torch.diag(torch.diag(gt_cov))
+                gt_mean = class_features.mean(0)
+                gt_cov = torch.cov(class_features.T)
+                gt_cov = self.shrink_cov(gt_cov, self.shrink)
+                gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
+                if self.adaptation_strategy == "diag":
+                    gt_cov = torch.diag(torch.diag(gt_cov))
 
-                    # Calculate old diffs
-                    old_mean_diff.append((gt_mean - old_means[c]).norm())
-                    old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
-                    old_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(old_covs[c].unsqueeze(0))))
-                    old_gauss = torch.distributions.MultivariateNormal(old_means[c], old_covs[c])
-                    old_kld.append(torch.distributions.kl_divergence(old_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, old_gauss))
-                    # Calculate new diffs
-                    new_mean_diff.append((gt_mean - self.means[c]).norm())
-                    new_cov_diff.append(torch.norm(gt_cov - self.covs[c]))
-                    new_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.covs[c].unsqueeze(0))))
-                    new_gauss = torch.distributions.MultivariateNormal(self.means[c], self.covs[c])
-                    new_kld.append(torch.distributions.kl_divergence(new_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, new_gauss))
+                # Calculate old diffs
+                old_mean_diff.append((gt_mean - old_means[c]).norm())
+                old_cov_diff.append(torch.norm(gt_cov - old_covs[c]))
+                old_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(old_covs[c].unsqueeze(0))))
+                old_gauss = torch.distributions.MultivariateNormal(old_means[c], old_covs[c])
+                old_kld.append(torch.distributions.kl_divergence(old_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, old_gauss))
+                # Calculate new diffs
+                new_mean_diff.append((gt_mean - self.means[c]).norm())
+                new_cov_diff.append(torch.norm(gt_cov - self.covs[c]))
+                new_cov_norm_diff.append(torch.norm(self.norm_cov(gt_cov.unsqueeze(0)) - self.norm_cov(self.covs[c].unsqueeze(0))))
+                new_gauss = torch.distributions.MultivariateNormal(self.means[c], self.covs[c])
+                new_kld.append(torch.distributions.kl_divergence(new_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, new_gauss))
 
-                old_mean_diff = torch.stack(old_mean_diff)
-                old_cov_diff = torch.stack(old_cov_diff)
-                old_cov_norm_diff = torch.stack(old_cov_norm_diff)
-                old_kld = torch.stack(old_kld)
+            old_mean_diff = torch.stack(old_mean_diff)
+            old_cov_diff = torch.stack(old_cov_diff)
+            old_cov_norm_diff = torch.stack(old_cov_norm_diff)
+            old_kld = torch.stack(old_kld)
 
-                new_mean_diff = torch.stack(new_mean_diff)
-                new_cov_diff = torch.stack(new_cov_diff)
-                new_cov_norm_diff = torch.stack(new_cov_norm_diff)
-                new_kld = torch.stack(new_kld)
-                print(f"Old {subset} mean diff: {old_mean_diff.mean():.2f} ± {old_mean_diff.std():.2f}")
-                print(f"New {subset} mean diff: {new_mean_diff.mean():.2f} ± {new_mean_diff.std():.2f}")
-                print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
-                print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
-                print(f"Old {subset} norm-cov diff: {old_cov_norm_diff.mean():.2f} ± {old_cov_norm_diff.std():.2f}")
-                print(f"New {subset} norm-cov diff: {new_cov_norm_diff.mean():.2f} ± {new_cov_norm_diff.std():.2f}")
-                print(f"Old {subset} KLD: {old_kld.mean():.2f} ± {old_kld.std():.2f}")
-                print(f"New {subset} KLD: {new_kld.mean():.2f} ± {new_kld.std():.2f}")
-                print("")
+            new_mean_diff = torch.stack(new_mean_diff)
+            new_cov_diff = torch.stack(new_cov_diff)
+            new_cov_norm_diff = torch.stack(new_cov_norm_diff)
+            new_kld = torch.stack(new_kld)
+            print(f"Old {subset} mean diff: {old_mean_diff.mean():.2f} ± {old_mean_diff.std():.2f}")
+            print(f"New {subset} mean diff: {new_mean_diff.mean():.2f} ± {new_mean_diff.std():.2f}")
+            print(f"Old {subset} cov diff: {old_cov_diff.mean():.2f} ± {old_cov_diff.std():.2f}")
+            print(f"New {subset} cov diff: {new_cov_diff.mean():.2f} ± {new_cov_diff.std():.2f}")
+            print(f"Old {subset} norm-cov diff: {old_cov_norm_diff.mean():.2f} ± {old_cov_norm_diff.std():.2f}")
+            print(f"New {subset} norm-cov diff: {new_cov_norm_diff.mean():.2f} ± {new_cov_norm_diff.std():.2f}")
+            print(f"Old {subset} KLD: {old_kld.mean():.2f} ± {old_kld.std():.2f}")
+            print(f"New {subset} KLD: {new_kld.mean():.2f} ± {new_kld.std():.2f}")
+            print("")
 
     @torch.no_grad()
     def create_distributions(self, t, trn_loader, val_loader, num_classes_in_t):
