@@ -412,7 +412,7 @@ class Appr(Inc_Learning_Appr):
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[1]):
                     cov = self.covs[expert_to_train, c].clone()
-                    distribution = MultivariateNormal(self.means[expert_to_train, c], cov)
+                    distribution = MultivariateNormal(self.old_means[expert_to_train, c], cov)
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
                         raise RuntimeError(f"Nan in features sampled for class {c}")
@@ -590,7 +590,7 @@ class Appr(Inc_Learning_Appr):
             for expert_num, model in enumerate(self.models):
                 features[expert_num] = model(images)
 
-            if self.classifier == "bayes":  # Calcualte mahalanobis distances
+            if self.classifier == "bayes":  # Calculate mahalanobis distances
                 dist = torch.zeros((self.K, images.shape[0], self.means.shape[1]), device=self.device)
                 for expert_num in range(self.K):
                     diff = F.normalize(features[expert_num].unsqueeze(1), p=2, dim=-1) - F.normalize(self.means[expert_num].unsqueeze(0), p=2, dim=-1)
