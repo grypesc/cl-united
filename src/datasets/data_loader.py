@@ -230,6 +230,9 @@ def get_transforms(resize, test_resize, pad, crop, flip, normalize, extend_chann
         trn_transform_list = [
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
+            transforms.TrivialAugmentWide(
+                interpolation=transforms.InterpolationMode.BILINEAR
+            ),
             transforms.ToTensor(),
             # transforms.ColorJitter(brightness=63 / 255),
             # CIFAR10Policy(),

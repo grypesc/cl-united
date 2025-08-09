@@ -411,8 +411,7 @@ class Appr(Inc_Learning_Appr):
 
             if self.adaptation_strategy == "full" or self.adaptation_strategy == "diag":
                 for c in range(self.means.shape[1]):
-                    cov = self.covs[expert_to_train, c].clone()
-                    distribution = MultivariateNormal(self.old_means[expert_to_train, c], cov)
+                    distribution = MultivariateNormal(self.old_means[expert_to_train, c], self.old_covs[expert_to_train, c])
                     samples = distribution.sample((self.N,))
                     if torch.isnan(samples).any():
                         raise RuntimeError(f"Nan in features sampled for class {c}")
