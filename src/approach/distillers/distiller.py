@@ -10,7 +10,7 @@ class OneToOneDistiller(torch.nn.Module):
                  num_experts,
                  sz_embedding,
                  multiplier,
-                 network_type,
+                 network_type="mlp",
                  ):
         super().__init__()
         self.num_experts = num_experts
@@ -70,6 +70,7 @@ class OneToOneAdapter(torch.nn.Module):
                 new_covs[expert_num, c] = torch.cov(adapted_samples.T)
                 new_covs[expert_num, c] = shrink_cov(new_covs[expert_num, c], shrink)
         return new_means, new_covs
+
 
 @torch.no_grad()
 def shrink_cov(cov, alpha1=1., alpha2=0.):

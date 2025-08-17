@@ -204,12 +204,12 @@ class Appr(Inc_Learning_Appr):
         self.train_data_loaders.extend([trn_loader])
         self.val_data_loaders.extend([val_loader])
         self.old_models = copy.deepcopy(self.models)
+        self.old_models.eval()
         self.old_means = copy.deepcopy(self.means)
         self.old_covs = copy.deepcopy(self.covs)
-        self.old_models.eval()
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
-        # state_dict = torch.load(f"../ckpts/model_{t}.pth")
+        # state_dict = torch.load(f"ckpts/model_{t}.pth")
         # self.model.load_state_dict(state_dict, strict=True)
 
         self.train_experts(t, trn_loader, val_loader, num_classes_in_t)
@@ -239,7 +239,7 @@ class Appr(Inc_Learning_Appr):
         val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         print(f'The expert has {sum(p.numel() for p in self.models.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.models.parameters() if not p.requires_grad):,} shared parameters\n')
-        distiller = OneToOneDistiller(self.K, self.S, self.multiplier, self.distillation)
+        distiller = OneToOneDistiller(self.K, self.S, self.multiplier, "mlp")
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(self.K, num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         if t == 0 and self.is_rotation:
@@ -276,8 +276,9 @@ class Appr(Inc_Learning_Appr):
                 kd_loss = 0
                 if t > 0:
                     old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
-                    for expert_num, old_model in enumerate(self.old_models):
-                        old_features[expert_num] = old_model(images)
+                    with torch.no_grad():
+                        for expert_num, old_model in enumerate(self.old_models):
+                            old_features[expert_num] = old_model(images)
                     if self.distillation != "none":
                         kd_loss = distiller(features, old_features)
 
@@ -336,7 +337,7 @@ class Appr(Inc_Learning_Appr):
 
         adapter = OneToOneAdapter(self.K, self.S, self.multiplier)
         adapter.to(self.device, non_blocking=True)
-        # state_dict = torch.load(f"../ckpts/adapter_{t}.pth")
+        # state_dict = torch.load(f"ckpts/adapter_{t}.pth")
         # adapter.load_state_dict(state_dict, strict=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         for epoch in range(self.nepochs // 2):
