@@ -269,13 +269,12 @@ class Appr(Inc_Learning_Appr):
 
                 # Perform knowledge distillation
                 kd_loss = 0
-                if t > 0:
+                if t > 0 and self.distiller is not None:
                     old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
                     with torch.no_grad():
                         for expert_num, old_model in enumerate(self.old_models):
                             old_features[expert_num] = old_model(images)
-                    if self.distiller is not None:
-                        kd_loss = distiller(features, old_features)
+                    kd_loss = distiller(features, old_features)
 
                 total_loss = discriminative_loss + self.lamb * kd_loss
                 total_loss.backward()
@@ -306,12 +305,11 @@ class Appr(Inc_Learning_Appr):
 
                         # Perform knowledge distillation
                         kd_loss = 0
-                        if t > 0:
+                        if t > 0 and self.distiller is not None:
                             old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
                             for expert_num, old_model in enumerate(self.old_models):
                                 old_features[expert_num] = old_model(images)
-                            if self.distiller is not None:
-                                kd_loss = distiller(features, old_features)
+                            kd_loss = distiller(features, old_features)
 
                         valid_loss.append(float(bsz * discriminative_loss))
                         valid_kd_loss.append(float(bsz * kd_loss))
@@ -377,6 +375,7 @@ class Appr(Inc_Learning_Appr):
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
 
         # Adaptation
+        adapter.eval()
         self.means, self.covs = adapter.adapt(self.means, self.covs)
 
     @torch.no_grad()
