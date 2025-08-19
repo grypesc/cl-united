@@ -14,7 +14,8 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .criterions.ensembled_ce import EnsembledCE
-from .distillers.distiller import OneToOneDistiller, OneToOneAdapter, shrink_cov, norm_cov
+from .ensemble_utils.distillers import BaselineDistiller, OneToManyDistiller
+from .ensemble_utils.adapters import BaselineAdapter, shrink_cov, norm_cov
 
 
 class SampledDataset(torch.utils.data.Dataset):
@@ -39,7 +40,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., distillation="projected", use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
                  adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., multiplier=32, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -84,11 +85,10 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"ce": EnsembledCE}[criterion]
-        self.adapter = {"onetoone": OneToOneAdapter}[adapter]
+        self.adapter = {"baseline": BaselineAdapter, "none": None}[adapter]
+        self.distiller = {"baseline": BaselineDistiller, "onetomany": OneToManyDistiller, "none": None}[distiller]
         self.sval_fraction = sval_fraction
         self.svals_explained_by = []
-        self.distiller_type = distiller
-        self.distillation = distillation
 
     @staticmethod
     def extra_parser(args):
@@ -147,16 +147,16 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["none", "mean", "diag", "full"],
                             default="full")
-        parser.add_argument('--distiller',
-                            help='Distiller',
-                            type=str,
-                            choices=["linear", "mlp"],
-                            default="mlp")
         parser.add_argument('--adapter',
                             help='Adapter',
                             type=str,
-                            choices=["onetoone"],
-                            default="onetoone")
+                            choices=["baseline", "onetoone", "onetomany", "none"],
+                            default="baseline")
+        parser.add_argument('--distiller',
+                            help='Distiller',
+                            type=str,
+                            choices=["baseline", "onetoone", "onetomany", "none"],
+                            default="baseline")
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
@@ -167,11 +167,6 @@ class Appr(Inc_Learning_Appr):
                             type=str,
                             choices=["bayes", "nmc"],
                             default="bayes")
-        parser.add_argument('--distillation',
-                            help='Distillation function',
-                            type=str,
-                            choices=["onetoone", "none"],
-                            default="onetoone")
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
@@ -239,7 +234,7 @@ class Appr(Inc_Learning_Appr):
         val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
         print(f'The expert has {sum(p.numel() for p in self.models.parameters() if p.requires_grad):,} trainable parameters')
         print(f'The expert has {sum(p.numel() for p in self.models.parameters() if not p.requires_grad):,} shared parameters\n')
-        distiller = OneToOneDistiller(self.K, self.S, self.multiplier, "mlp")
+        distiller = self.distiller(self.K, self.S, self.multiplier, "mlp")
         distiller.to(self.device, non_blocking=True)
         criterion = self.criterion(self.K, num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
         if t == 0 and self.is_rotation:
@@ -279,7 +274,7 @@ class Appr(Inc_Learning_Appr):
                     with torch.no_grad():
                         for expert_num, old_model in enumerate(self.old_models):
                             old_features[expert_num] = old_model(images)
-                    if self.distillation != "none":
+                    if self.distiller is not None:
                         kd_loss = distiller(features, old_features)
 
                 total_loss = discriminative_loss + self.lamb * kd_loss
@@ -315,7 +310,7 @@ class Appr(Inc_Learning_Appr):
                             old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
                             for expert_num, old_model in enumerate(self.old_models):
                                 old_features[expert_num] = old_model(images)
-                            if self.distillation != "none":
+                            if self.distiller is not None:
                                 kd_loss = distiller(features, old_features)
 
                         valid_loss.append(float(bsz * discriminative_loss))
@@ -335,7 +330,7 @@ class Appr(Inc_Learning_Appr):
         # Train the adapter
         self.models.eval()
 
-        adapter = OneToOneAdapter(self.K, self.S, self.multiplier)
+        adapter = self.adapter(self.K, self.S, self.multiplier)
         adapter.to(self.device, non_blocking=True)
         # state_dict = torch.load(f"ckpts/adapter_{t}.pth")
         # adapter.load_state_dict(state_dict, strict=True)
