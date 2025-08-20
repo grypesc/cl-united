@@ -25,7 +25,7 @@ class BaselineAdapter(torch.nn.Module):
     def forward(self, features, target_features):
         total_loss = 0
         for e, network in enumerate(self.adapters):
-            total_loss += F.mse_loss(network(features[e]), target_features[e])
+            total_loss += F.mse_loss(network(features[:, e]), target_features[:, e])
         return total_loss / self.num_experts
 
     @torch.no_grad()
@@ -35,16 +35,16 @@ class BaselineAdapter(torch.nn.Module):
         new_covs = torch.zeros_like(covs)
 
         for expert_num, adapter in enumerate(self.adapters):
-            for c in range(means.shape[1]):
-                distribution = MultivariateNormal(means[expert_num, c], covs[expert_num, c])
+            for c in range(means.shape[0]):
+                distribution = MultivariateNormal(means[c, expert_num], covs[c, expert_num])
                 samples = distribution.sample((10000,))
                 if torch.isnan(samples).any():
                     raise RuntimeError(f"Nan in features sampled for class {c}")
                 adapted_samples = adapter(samples)
-                new_means[expert_num, c] = adapted_samples.mean(0)
+                new_means[c, expert_num] = adapted_samples.mean(0)
                 # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
-                new_covs[expert_num, c] = torch.cov(adapted_samples.T)
-                new_covs[expert_num, c] = shrink_cov(new_covs[expert_num, c], shrink)
+                new_covs[c, expert_num] = torch.cov(adapted_samples.T)
+                new_covs[c, expert_num] = shrink_cov(new_covs[c, expert_num], shrink)
         return new_means, new_covs
 
 

@@ -18,7 +18,7 @@ class EnsembledCE(torch.nn.Module):
     def forward(self, features, T):
         total_loss = 0
         for e in range(self.num_experts):
-            logits = self.heads[e](features[e])
+            logits = self.heads[e](features[:, e])
             total_loss += F.cross_entropy(logits, T, label_smoothing=self.smoothing)
         return total_loss / self.num_experts
 

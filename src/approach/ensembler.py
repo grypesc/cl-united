@@ -13,7 +13,7 @@ from torchmetrics import Accuracy
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
-from .criterions.ensembled_ce import EnsembledCE
+from .ensemble_utils.criterions import EnsembledCE
 from .ensemble_utils.distillers import BaselineDistiller, OneToManyDistiller
 from .ensemble_utils.adapters import BaselineAdapter, shrink_cov, norm_cov
 
@@ -74,8 +74,8 @@ class Appr(Inc_Learning_Appr):
         for i in range(self.K):
             self.models[i].to(device, non_blocking=True)
         self.train_data_loaders, self.val_data_loaders = [], []
-        self.means = torch.empty((self.K, 0, self.S), device=self.device)
-        self.covs = torch.empty((self.K, 0, self.S, self.S), device=self.device)
+        self.means = torch.empty((0, self.K, self.S), device=self.device)
+        self.covs = torch.empty((0, self.K, self.S, self.S), device=self.device)
         self.covs_inverted = None
         self.old_means = None
         self.old_covs = None
@@ -260,9 +260,9 @@ class Appr(Inc_Learning_Appr):
                 images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
 
-                features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                features = torch.zeros((bsz, self.K, self.S), device=self.device)
                 for expert_num, model in enumerate(self.models):
-                    features[expert_num] = model(images)
+                    features[:, expert_num] = model(images)
                 if epoch < int(self.nepochs * 0.01):
                     features = features.detach()
                 discriminative_loss = criterion(features, targets)
@@ -270,10 +270,10 @@ class Appr(Inc_Learning_Appr):
                 # Perform knowledge distillation
                 kd_loss = 0
                 if t > 0 and self.distiller is not None:
-                    old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                    old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
                     with torch.no_grad():
                         for expert_num, old_model in enumerate(self.old_models):
-                            old_features[expert_num] = old_model(images)
+                            old_features[:, expert_num] = old_model(images)
                     kd_loss = distiller(features, old_features)
 
                 total_loss = discriminative_loss + self.lamb * kd_loss
@@ -298,17 +298,17 @@ class Appr(Inc_Learning_Appr):
                         val_total += bsz
                         images, targets = images.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
 
-                        features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                        features = torch.zeros((bsz, self.K, self.S), device=self.device)
                         for expert_num, model in enumerate(self.models):
-                            features[expert_num] = model(images)
+                            features[:, expert_num] = model(images)
                         discriminative_loss = criterion(features, targets)
 
                         # Perform knowledge distillation
                         kd_loss = 0
                         if t > 0 and self.distiller is not None:
-                            old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                            old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
                             for expert_num, old_model in enumerate(self.old_models):
-                                old_features[expert_num] = old_model(images)
+                                old_features[:, expert_num] = old_model(images)
                             kd_loss = distiller(features, old_features)
 
                         valid_loss.append(float(bsz * discriminative_loss))
@@ -340,12 +340,12 @@ class Appr(Inc_Learning_Appr):
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
-                new_features = torch.zeros((self.K, bsz, self.S), device=self.device)
-                old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
                 with torch.no_grad():
                     for expert_num in range(self.K):
-                        new_features[expert_num] = self.models[expert_num](images)
-                        old_features[expert_num] = self.old_models[expert_num](images)
+                        new_features[:, expert_num] = self.models[expert_num](images)
+                        old_features[:, expert_num] = self.old_models[expert_num](images)
                 loss = adapter(old_features, new_features)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
@@ -362,8 +362,8 @@ class Appr(Inc_Learning_Appr):
                         new_features = torch.zeros((self.K, bsz, self.S), device=self.device)
                         old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
                         for expert_num in range(self.K):
-                            new_features[expert_num] = self.models[expert_num](images)
-                            old_features[expert_num] = self.old_models[expert_num](images)
+                            new_features[:, expert_num] = self.models[expert_num](images)
+                            old_features[:, expert_num] = self.old_models[expert_num](images)
                         loss = adapter(old_features, new_features)
                         valid_loss.append(float(bsz * loss))
 
@@ -415,16 +415,16 @@ class Appr(Inc_Learning_Appr):
                 gt_gauss = torch.distributions.MultivariateNormal(gt_mean, gt_cov)
 
                 # Calculate old diffs
-                old_mean_diff.append((gt_mean - self.old_means[expert_trained, c]).norm())
-                old_cov_diff.append(torch.norm(gt_cov - self.old_covs[expert_trained, c]))
-                old_cov_norm_diff.append(torch.norm(norm_cov(gt_cov.unsqueeze(0)) - norm_cov(self.old_covs[expert_trained, c].unsqueeze(0))))
-                old_gauss = torch.distributions.MultivariateNormal(self.old_means[expert_trained, c], self.old_covs[expert_trained, c])
+                old_mean_diff.append((gt_mean - self.old_means[c, expert_trained]).norm())
+                old_cov_diff.append(torch.norm(gt_cov - self.old_covs[c, expert_trained]))
+                old_cov_norm_diff.append(torch.norm(norm_cov(gt_cov.unsqueeze(0)) - norm_cov(self.old_covs[c, expert_trained].unsqueeze(0))))
+                old_gauss = torch.distributions.MultivariateNormal(self.old_means[c, expert_trained], self.old_covs[c, expert_trained])
                 old_kld.append(torch.distributions.kl_divergence(old_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, old_gauss))
                 # Calculate new diffs
-                new_mean_diff.append((gt_mean - self.means[expert_trained, c]).norm())
-                new_cov_diff.append(torch.norm(gt_cov - self.covs[expert_trained, c]))
-                new_cov_norm_diff.append(torch.norm(norm_cov(gt_cov.unsqueeze(0)) - norm_cov(self.covs[expert_trained, c].unsqueeze(0))))
-                new_gauss = torch.distributions.MultivariateNormal(self.means[expert_trained, c], self.covs[expert_trained, c])
+                new_mean_diff.append((gt_mean - self.means[c, expert_trained]).norm())
+                new_cov_diff.append(torch.norm(gt_cov - self.covs[c, expert_trained]))
+                new_cov_norm_diff.append(torch.norm(norm_cov(gt_cov.unsqueeze(0)) - norm_cov(self.covs[c, expert_trained].unsqueeze(0))))
+                new_gauss = torch.distributions.MultivariateNormal(self.means[c, expert_trained], self.covs[c, expert_trained])
                 new_kld.append(torch.distributions.kl_divergence(new_gauss, gt_gauss) + torch.distributions.kl_divergence(gt_gauss, new_gauss))
 
             old_mean_diff = torch.stack(old_mean_diff)
@@ -451,8 +451,8 @@ class Appr(Inc_Learning_Appr):
         """ Creating distributions for task t"""
         self.models.eval()
         transforms = val_loader.dataset.transform
-        new_means = torch.zeros((self.K, num_classes_in_t, self.S), device=self.device)
-        new_covs = torch.zeros((self.K, num_classes_in_t, self.S, self.S), device=self.device)
+        new_means = torch.zeros((num_classes_in_t, self.K,  self.S), device=self.device)
+        new_covs = torch.zeros((num_classes_in_t, self.K, self.S, self.S), device=self.device)
 
         for c in range(num_classes_in_t):
             train_indices = torch.tensor(trn_loader.dataset.labels) == c + self.task_offset[t]
@@ -464,15 +464,15 @@ class Appr(Inc_Learning_Appr):
                 ds = ClassMemoryDataset(ds, transforms)
             loader = torch.utils.data.DataLoader(ds, batch_size=128, num_workers=trn_loader.num_workers, shuffle=False)
             from_ = 0
-            class_features = torch.zeros((self.K, 2 * len(ds), self.S), device=self.device)
+            class_features = torch.zeros((2 * len(ds), self.K, self.S), device=self.device)
             for images in loader:
                 bsz = images.shape[0]
                 images = images.to(self.device, non_blocking=True)
                 for expert_num, model in enumerate(self.models):
                     features = model(images)
-                    class_features[expert_num, from_: from_ + bsz] = features
+                    class_features[from_: from_ + bsz, expert_num] = features
                     features = model(torch.flip(images, dims=(3,)))
-                    class_features[expert_num, from_ + bsz: from_ + 2 * bsz] = features
+                    class_features[from_ + bsz: from_ + 2 * bsz, expert_num] = features
                 from_ += 2 * bsz
 
             # svals = torch.linalg.svdvals(class_features)
@@ -480,18 +480,18 @@ class Appr(Inc_Learning_Appr):
             # svals_task[c] = svals
 
             # Calculate  mean and cov
-            new_means[:, c] = class_features.mean(dim=1)
+            new_means[c, :] = class_features.mean(dim=0)
             for expert_num, _ in enumerate(self.models):
-                new_covs[expert_num, c] = shrink_cov(torch.cov(class_features[expert_num].T), self.shrink)
+                new_covs[c, expert_num] = shrink_cov(torch.cov(class_features[:, expert_num].T), self.shrink)
                 if self.adaptation_strategy == "diag":
-                    new_covs[expert_num, c] = torch.diag(torch.diag(new_covs[expert_num, c]))
+                    new_covs[c, expert_num] = torch.diag(torch.diag(new_covs[c, expert_num]))
 
-            if torch.isnan(new_covs[:, c]).any():
+            if torch.isnan(new_covs[c, :]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
 
         # np.savetxt("svals_collapse.txt", np.array(svals_task.mean(0).cpu()))
-        self.means = torch.cat((self.means, new_means), dim=1)
-        self.covs = torch.cat((self.covs, new_covs), dim=1)
+        self.means = torch.cat((self.means, new_means), dim=0)
+        self.covs = torch.cat((self.covs, new_covs), dim=0)
 
     def get_optimizer(self, parameters, t, wd):
         """Returns the optimizer"""
@@ -513,26 +513,27 @@ class Appr(Inc_Learning_Appr):
     def eval(self, t, val_loader):
         """ Perform nearest centroids classification """
         self.models.eval()
-        tag_acc = Accuracy("multiclass", num_classes=self.means.shape[1])
+        tag_acc = Accuracy("multiclass", num_classes=self.means.shape[0])
         taw_acc = Accuracy("multiclass", num_classes=self.classes_in_tasks[t])
         offset = self.task_offset[t]
         for images, target in val_loader:
             images = images.to(self.device, non_blocking=True)
-            features = torch.zeros((self.K, images.shape[0], self.S), device=self.device)
+            features = torch.zeros((images.shape[0], self.K, self.S), device=self.device)
             for expert_num, model in enumerate(self.models):
-                features[expert_num] = model(images)
+                features[:, expert_num] = model(images)
 
             if self.classifier == "bayes":  # Calculate mahalanobis distances
-                dist = torch.zeros((self.K, images.shape[0], self.means.shape[1]), device=self.device)
+                dist = torch.zeros((images.shape[0], self.K, self.means.shape[0]), device=self.device)
                 for expert_num in range(self.K):
-                    diff = F.normalize(features[expert_num].unsqueeze(1), p=2, dim=-1) - F.normalize(self.means[expert_num].unsqueeze(0), p=2, dim=-1)
-                    res = diff.unsqueeze(2) @ self.covs_inverted[expert_num].unsqueeze(0)
+                    diff = F.normalize(features[:, expert_num].unsqueeze(1), p=2, dim=-1) - F.normalize(self.means[:, expert_num].unsqueeze(0), p=2, dim=-1)
+                    res = diff.unsqueeze(2) @ self.covs_inverted[:, expert_num].unsqueeze(0)
                     res = res @ diff.unsqueeze(3)
-                    dist[expert_num] = res.squeeze(2).squeeze(2)
+                    dist[:, expert_num] = res.squeeze(2).squeeze(2)
             else:  # Euclidean
-                dist = torch.cdist(features, self.means)
+                for expert_num in range(self.K):
+                    dist[:, expert_num] = torch.cdist(features[:, expert_num], self.means[:, expert_num])
 
-            dist = dist.mean(0)
+            dist = dist.mean(1)
             tag_preds = torch.argmin(dist, dim=1)
             taw_preds = torch.argmin(dist[:, offset: offset + self.classes_in_tasks[t]], dim=1) + offset
 
