@@ -14,8 +14,8 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .ensemble_utils.criterions import EnsembledCE
-from .ensemble_utils.distillers import BaselineDistiller, OneToManyDistiller
-from .ensemble_utils.adapters import BaselineAdapter, shrink_cov, norm_cov
+from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller
+from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, shrink_cov, norm_cov
 
 
 class SampledDataset(torch.utils.data.Dataset):
@@ -40,7 +40,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0., sval_fraction=0.95,
+                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0.,
                  adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., multiplier=32, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -85,10 +85,8 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"ce": EnsembledCE}[criterion]
-        self.adapter = {"baseline": BaselineAdapter, "none": None}[adapter]
-        self.distiller = {"baseline": BaselineDistiller, "onetomany": OneToManyDistiller, "none": None}[distiller]
-        self.sval_fraction = sval_fraction
-        self.svals_explained_by = []
+        self.adapter = {"baseline": BaselineAdapter, "concatenated": ConcatenatedAdapter, "none": None}[adapter]
+        self.distiller = {"baseline": BaselineDistiller, "concatenated": ConcatenatedDistiller, "none": None}[distiller]
 
     @staticmethod
     def extra_parser(args):
@@ -138,10 +136,6 @@ class Appr(Inc_Learning_Appr):
                             help='shrink during inference',
                             type=float,
                             default=0.0)
-        parser.add_argument('--sval-fraction',
-                            help='Fraction of eigenvalues sum that is explained',
-                            type=float,
-                            default=0.95)
         parser.add_argument('--adaptation-strategy',
                             help='Activation functions in resnet',
                             type=str,
@@ -150,12 +144,12 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--adapter',
                             help='Adapter',
                             type=str,
-                            choices=["baseline", "onetoone", "onetomany", "none"],
+                            choices=["baseline", "concatenated", "averaged", "none"],
                             default="baseline")
         parser.add_argument('--distiller',
                             help='Distiller',
                             type=str,
-                            choices=["baseline", "onetoone", "onetomany", "none"],
+                            choices=["baseline", "concatenated", "averaged", "none"],
                             default="baseline")
         parser.add_argument('--criterion',
                             help='Loss function',
@@ -204,8 +198,8 @@ class Appr(Inc_Learning_Appr):
         self.old_covs = copy.deepcopy(self.covs)
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
         print("### Training backbone ###")
-        # state_dict = torch.load(f"ckpts/model_{t}.pth")
-        # self.model.load_state_dict(state_dict, strict=True)
+        # state_dict = torch.load(f"ckpts-5/models_{t}.pth")
+        # self.models.load_state_dict(state_dict, strict=True)
 
         self.train_experts(t, trn_loader, val_loader, num_classes_in_t)
         if t > 0 and self.adaptation_strategy != "none":
@@ -330,7 +324,7 @@ class Appr(Inc_Learning_Appr):
 
         adapter = self.adapter(self.K, self.S, self.multiplier)
         adapter.to(self.device, non_blocking=True)
-        # state_dict = torch.load(f"ckpts/adapter_{t}.pth")
+        # state_dict = torch.load(f"ckpts-5/adapter_{t}.pth")
         # adapter.load_state_dict(state_dict, strict=True)
         optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
         for epoch in range(self.nepochs // 2):

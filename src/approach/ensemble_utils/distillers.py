@@ -27,7 +27,7 @@ class BaselineDistiller(torch.nn.Module):
         return total_loss / self.num_experts
 
 
-class OneToManyDistiller(torch.nn.Module):
+class ConcatenatedDistiller(torch.nn.Module):
     def __init__(self,
                  num_experts,
                  sz_embedding,
@@ -47,7 +47,6 @@ class OneToManyDistiller(torch.nn.Module):
     def forward(self, features, target_features):
         total_loss = 0
         features = features.flatten(1)
-        features = torch.cat((features[0], features[1]), dim=1)
         for e, network in enumerate(self.distillers):
-            total_loss += F.mse_loss(network(features[e]), target_features[e])
+            total_loss += F.mse_loss(network(features), target_features[:, e])
         return total_loss / self.num_experts
