@@ -14,8 +14,8 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .ensemble_utils.criterions import EnsembledCE
-from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller
-from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, shrink_cov, norm_cov
+from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller, AveragedDistiller
+from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, AveragedAdapter, shrink_cov, norm_cov
 
 
 class SampledDataset(torch.utils.data.Dataset):
@@ -85,8 +85,10 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"ce": EnsembledCE}[criterion]
-        self.adapter = {"baseline": BaselineAdapter, "concatenated": ConcatenatedAdapter, "none": None}[adapter]
-        self.distiller = {"baseline": BaselineDistiller, "concatenated": ConcatenatedDistiller, "none": None}[distiller]
+        self.adapter = {"baseline": BaselineAdapter, "concatenated": ConcatenatedAdapter,
+                        "averaged": AveragedAdapter, "none": None}[adapter]
+        self.distiller = {"baseline": BaselineDistiller, "concatenated": ConcatenatedDistiller,
+                          "averaged": AveragedDistiller, "none": None}[distiller]
 
     @staticmethod
     def extra_parser(args):
@@ -353,8 +355,8 @@ class Appr(Inc_Learning_Appr):
                     for images, _ in val_loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
-                        new_features = torch.zeros((self.K, bsz, self.S), device=self.device)
-                        old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                        new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                        old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
                         for expert_num in range(self.K):
                             new_features[:, expert_num] = self.models[expert_num](images)
                             old_features[:, expert_num] = self.old_models[expert_num](images)
@@ -492,7 +494,7 @@ class Appr(Inc_Learning_Appr):
         milestones = (int(0.3 * self.nepochs), int(0.6 * self.nepochs), int(0.9 * self.nepochs))
         lr = self.lr
         if t > 0 and not self.pretrained:
-            lr *= 0.1
+            lr *= 0.33
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
