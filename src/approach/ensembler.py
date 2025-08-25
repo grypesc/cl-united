@@ -201,8 +201,8 @@ class Appr(Inc_Learning_Appr):
         for expert_num in range(self.K):
 
             print(f"Cov matrix det: {torch.linalg.det(covs[:, expert_num])}")
-            for i in range(covs.shape[1]):
-                print(f"Rank for expert: {expert_num}, class {i}: {torch.linalg.matrix_rank(self.covs[expert_num, i], tol=0.01)}")
+            for i in range(covs.shape[0]):
+                print(f"Rank for expert: {expert_num}, class {i}: {torch.linalg.matrix_rank(self.covs[i, expert_num], tol=0.01)}")
                 covs[i, expert_num] = shrink_cov(covs[i, expert_num], 3)
             covs[:, expert_num] = norm_cov(covs[:, expert_num])
 
@@ -460,10 +460,10 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c, :] = class_features.mean(dim=0)
-            for expert_num, _ in enumerate(self.models):
+            for expert_num in range(self.K):
                 new_covs[c, expert_num] = shrink_cov(torch.cov(class_features[:, expert_num].T), self.shrink)
-                if self.adaptation_strategy == "diag":
-                    new_covs[c, expert_num] = torch.diag(torch.diag(new_covs[c, expert_num]))
+                # if self.adaptation_strategy == "diag":
+                #     new_covs[c, expert_num] = torch.diag(torch.diag(new_covs[c, expert_num]))
 
             if torch.isnan(new_covs[c, :]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
