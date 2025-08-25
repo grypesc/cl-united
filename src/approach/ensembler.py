@@ -501,8 +501,8 @@ class Appr(Inc_Learning_Appr):
             for expert_num, model in enumerate(self.models):
                 features[:, expert_num] = model(images)
 
+            dist = torch.zeros((images.shape[0], self.K, self.means.shape[0]), device=self.device)
             if self.classifier == "bayes":  # Calculate mahalanobis distances
-                dist = torch.zeros((images.shape[0], self.K, self.means.shape[0]), device=self.device)
                 for expert_num in range(self.K):
                     diff = F.normalize(features[:, expert_num].unsqueeze(1), p=2, dim=-1) - F.normalize(self.means[:, expert_num].unsqueeze(0), p=2, dim=-1)
                     res = diff.unsqueeze(2) @ self.covs_inverted[:, expert_num].unsqueeze(0)
