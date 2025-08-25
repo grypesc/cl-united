@@ -18,23 +18,6 @@ from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller,
 from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, AveragedAdapter, shrink_cov, norm_cov
 
 
-class SampledDataset(torch.utils.data.Dataset):
-    """ Dataset that samples pseudo prototypes from memorized distributions to train pseudo head """
-
-    def __init__(self, distributions, samples, task_offset):
-        self.distributions = distributions
-        self.samples = samples
-        self.total_classes = task_offset[-1]
-
-    def __len__(self):
-        return self.samples
-
-    def __getitem__(self, index):
-        target = random.randint(0, self.total_classes - 1)
-        val = self.distributions[target].sample()
-        return val, target
-
-
 class Appr(Inc_Learning_Appr):
     """Class implementing the joint baseline"""
 
@@ -217,11 +200,11 @@ class Appr(Inc_Learning_Appr):
         covs = self.covs.clone()
         for expert_num in range(self.K):
 
-            print(f"Cov matrix det: {torch.linalg.det(covs[expert_num])}")
+            print(f"Cov matrix det: {torch.linalg.det(covs[:, expert_num])}")
             for i in range(covs.shape[1]):
                 print(f"Rank for expert: {expert_num}, class {i}: {torch.linalg.matrix_rank(self.covs[expert_num, i], tol=0.01)}")
-                covs[expert_num, i] = shrink_cov(covs[expert_num, i], 3)
-            covs[expert_num] = norm_cov(covs[expert_num])
+                covs[i, expert_num] = shrink_cov(covs[i, expert_num], 3)
+            covs[:, expert_num] = norm_cov(covs[:, expert_num])
 
         self.covs_inverted = torch.linalg.inv(covs)
 
