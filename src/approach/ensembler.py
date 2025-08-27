@@ -370,7 +370,7 @@ class Appr(Inc_Learning_Appr):
 
         # Adaptation
         adapter.eval()
-        self.means, self.covs = adapter.adapt(self.means, self.covs)
+        self.means, self.covs = adapter.adapt(self.means, self.covs, shrink=self.shrink)
 
     @torch.no_grad()
     def evaluate_adaptation(self, expert_trained, trn_loader, val_loader):

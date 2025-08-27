@@ -36,10 +36,18 @@ class BaselineAdapter(torch.nn.Module):
 
         for expert_num, adapter in enumerate(self.adapters):
             for c in range(means.shape[0]):
-                distribution = MultivariateNormal(means[c, expert_num], covs[c, expert_num])
-                samples = distribution.sample((10000,))
-                if torch.isnan(samples).any():
-                    raise RuntimeError(f"Nan in features sampled for class {c}")
+                is_ok = False
+                additional_shrink_factor = 1.0
+                while not is_ok:
+                    distribution = MultivariateNormal(means[c, expert_num], covs[c, expert_num])
+                    samples = distribution.sample((10000,))
+                    if not torch.isnan(samples).any():
+                        is_ok = True
+                    else:
+                        print("Applying additional shrinking factor.")
+                        additional_shrink_factor *= 10
+                        covs[c, expert_num] = shrink_cov(covs[c, expert_num], shrink * additional_shrink_factor)
+
                 adapted_samples = adapter(samples)
                 new_means[c, expert_num] = adapted_samples.mean(0)
                 # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
