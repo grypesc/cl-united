@@ -14,25 +14,8 @@ from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
 from .ensemble_utils.criterions import EnsembledCE
-from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller
-from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, shrink_cov, norm_cov
-
-
-class SampledDataset(torch.utils.data.Dataset):
-    """ Dataset that samples pseudo prototypes from memorized distributions to train pseudo head """
-
-    def __init__(self, distributions, samples, task_offset):
-        self.distributions = distributions
-        self.samples = samples
-        self.total_classes = task_offset[-1]
-
-    def __len__(self):
-        return self.samples
-
-    def __getitem__(self, index):
-        target = random.randint(0, self.total_classes - 1)
-        val = self.distributions[target].sample()
-        return val, target
+from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller, AveragedDistiller
+from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, AveragedAdapter, shrink_cov, norm_cov
 
 
 class Appr(Inc_Learning_Appr):
@@ -85,8 +68,10 @@ class Appr(Inc_Learning_Appr):
         self.task_offset = [0]
         self.classes_in_tasks = []
         self.criterion = {"ce": EnsembledCE}[criterion]
-        self.adapter = {"baseline": BaselineAdapter, "concatenated": ConcatenatedAdapter, "none": None}[adapter]
-        self.distiller = {"baseline": BaselineDistiller, "concatenated": ConcatenatedDistiller, "none": None}[distiller]
+        self.adapter = {"baseline": BaselineAdapter, "concatenated": ConcatenatedAdapter,
+                        "averaged": AveragedAdapter, "none": None}[adapter]
+        self.distiller = {"baseline": BaselineDistiller, "concatenated": ConcatenatedDistiller,
+                          "averaged": AveragedDistiller, "none": None}[distiller]
 
     @staticmethod
     def extra_parser(args):
@@ -215,11 +200,11 @@ class Appr(Inc_Learning_Appr):
         covs = self.covs.clone()
         for expert_num in range(self.K):
 
-            print(f"Cov matrix det: {torch.linalg.det(covs[expert_num])}")
-            for i in range(covs.shape[1]):
-                print(f"Rank for expert: {expert_num}, class {i}: {torch.linalg.matrix_rank(self.covs[expert_num, i], tol=0.01)}")
-                covs[expert_num, i] = shrink_cov(covs[expert_num, i], 3)
-            covs[expert_num] = norm_cov(covs[expert_num])
+            print(f"Cov matrix det: {torch.linalg.det(covs[:, expert_num])}")
+            for i in range(covs.shape[0]):
+                print(f"Rank for expert: {expert_num}, class {i}: {torch.linalg.matrix_rank(self.covs[i, expert_num], tol=0.01)}")
+                covs[i, expert_num] = shrink_cov(covs[i, expert_num], 3)
+            covs[:, expert_num] = norm_cov(covs[:, expert_num])
 
         self.covs_inverted = torch.linalg.inv(covs)
 
@@ -353,8 +338,8 @@ class Appr(Inc_Learning_Appr):
                     for images, _ in val_loader:
                         bsz = images.shape[0]
                         images = images.to(self.device, non_blocking=True)
-                        new_features = torch.zeros((self.K, bsz, self.S), device=self.device)
-                        old_features = torch.zeros((self.K, bsz, self.S), device=self.device)
+                        new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                        old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
                         for expert_num in range(self.K):
                             new_features[:, expert_num] = self.models[expert_num](images)
                             old_features[:, expert_num] = self.old_models[expert_num](images)
@@ -475,10 +460,10 @@ class Appr(Inc_Learning_Appr):
 
             # Calculate  mean and cov
             new_means[c, :] = class_features.mean(dim=0)
-            for expert_num, _ in enumerate(self.models):
+            for expert_num in range(self.K):
                 new_covs[c, expert_num] = shrink_cov(torch.cov(class_features[:, expert_num].T), self.shrink)
-                if self.adaptation_strategy == "diag":
-                    new_covs[c, expert_num] = torch.diag(torch.diag(new_covs[c, expert_num]))
+                # if self.adaptation_strategy == "diag":
+                #     new_covs[c, expert_num] = torch.diag(torch.diag(new_covs[c, expert_num]))
 
             if torch.isnan(new_covs[c, :]).any():
                 raise RuntimeError(f"Nan in covariance matrix of class {c}")
@@ -492,7 +477,7 @@ class Appr(Inc_Learning_Appr):
         milestones = (int(0.3 * self.nepochs), int(0.6 * self.nepochs), int(0.9 * self.nepochs))
         lr = self.lr
         if t > 0 and not self.pretrained:
-            lr *= 0.1
+            lr *= 0.33
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
         return optimizer, scheduler
@@ -516,8 +501,8 @@ class Appr(Inc_Learning_Appr):
             for expert_num, model in enumerate(self.models):
                 features[:, expert_num] = model(images)
 
+            dist = torch.zeros((images.shape[0], self.K, self.means.shape[0]), device=self.device)
             if self.classifier == "bayes":  # Calculate mahalanobis distances
-                dist = torch.zeros((images.shape[0], self.K, self.means.shape[0]), device=self.device)
                 for expert_num in range(self.K):
                     diff = F.normalize(features[:, expert_num].unsqueeze(1), p=2, dim=-1) - F.normalize(self.means[:, expert_num].unsqueeze(0), p=2, dim=-1)
                     res = diff.unsqueeze(2) @ self.covs_inverted[:, expert_num].unsqueeze(0)

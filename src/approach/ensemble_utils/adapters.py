@@ -72,12 +72,13 @@ class ConcatenatedAdapter(torch.nn.Module):
                                                      nn.Linear(d * x, x)
                                                      )
         self.adapters = nn.ModuleList([network_fun(sz_embedding, multiplier, num_experts) for _ in range(self.num_experts)])
+        self.N = 10000
 
     def forward(self, features, target_features):
         total_loss = 0
+        features = features.flatten(1)
         for e, network in enumerate(self.adapters):
-            features = features.flatten(1)
-            total_loss += F.mse_loss(network(features[:, e]), target_features[:, e])
+            total_loss += F.mse_loss(network(features), target_features[:, e])
         return total_loss / self.num_experts
 
     @torch.no_grad()
@@ -86,17 +87,74 @@ class ConcatenatedAdapter(torch.nn.Module):
         new_means = torch.zeros_like(means)
         new_covs = torch.zeros_like(covs)
 
-        for expert_num, adapter in enumerate(self.adapters):
+        for expert_adapted, adapter in enumerate(self.adapters):
             for c in range(means.shape[0]):
-                distribution = MultivariateNormal(means[c, expert_num], covs[c, expert_num])
-                samples = distribution.sample((10000,))
+                samples = torch.zeros((10000, self.num_experts,  means.shape[2]), device=means.device)
+                for e in range(self.num_experts):
+                    distribution = MultivariateNormal(means[c, e], covs[c, e])
+                    samples[:, e, :] = distribution.sample((self.N,))
+                samples = samples.flatten(1)
                 if torch.isnan(samples).any():
                     raise RuntimeError(f"Nan in features sampled for class {c}")
                 adapted_samples = adapter(samples)
-                new_means[c, expert_num] = adapted_samples.mean(0)
+                new_means[c, expert_adapted] = adapted_samples.mean(0)
                 # print(f"Rank pre-adapt {c}: {torch.linalg.matrix_rank(self.covs[c])}")
-                new_covs[c, expert_num] = torch.cov(adapted_samples.T)
-                new_covs[c, expert_num] = shrink_cov(new_covs[c, expert_num], shrink)
+                new_covs[c, expert_adapted] = torch.cov(adapted_samples.T)
+                new_covs[c, expert_adapted] = shrink_cov(new_covs[c, expert_adapted], shrink)
+        return new_means, new_covs
+
+
+class AveragedAdapter(torch.nn.Module):
+    def __init__(self,
+                 num_experts,
+                 sz_embedding,
+                 multiplier,
+                 network_type="mlp",
+                 ):
+        super().__init__()
+        self.num_experts = num_experts
+        self.sz_embedding = sz_embedding
+        network_fun = lambda x, d: nn.Linear(x, x)
+        if network_type == "mlp":
+            network_fun = lambda x, d: nn.Sequential(nn.Linear(x, d * x),
+                                                     nn.GELU(),
+                                                     nn.Linear(d * x, x)
+                                                     )
+        self.adapters = nn.ModuleList([
+            nn.ModuleList([network_fun(sz_embedding, multiplier) for _ in range(self.num_experts)])
+            for i in range(self.num_experts)])
+        self.N = 10000
+
+    def forward(self, features, target_features):
+        total_loss = 0
+        for expert_adapted, networks_list in enumerate(self.adapters):
+            for e, network in enumerate(networks_list):
+                total_loss += F.mse_loss(network(features[:, expert_adapted]), target_features[:, expert_adapted])
+        return total_loss / self.num_experts
+
+    @torch.no_grad()
+    def adapt(self, means, covs, shrink=0.):
+        self.adapters.eval()
+        new_means = torch.zeros(means.shape[0], self.num_experts, self.num_experts, self.sz_embedding, device=means.device)
+        new_covs = torch.zeros(means.shape[0], self.num_experts, self.num_experts, self.sz_embedding, self.sz_embedding, device=means.device)
+
+        for expert_adapted, networks_list in enumerate(self.adapters):
+            for c in range(means.shape[0]):
+                for e in range(self.num_experts):
+                    distribution = MultivariateNormal(means[c, e], covs[c, e])
+                    samples = distribution.sample((self.N,))
+                    samples = samples.flatten(1)
+                    if torch.isnan(samples).any():
+                        raise RuntimeError(f"Nan in features sampled for class {c}")
+                    adapted_samples = networks_list[e](samples)
+                    new_means[c, expert_adapted, e] = adapted_samples.mean(0)
+
+                    new_covs[c, expert_adapted, e] = torch.cov(adapted_samples.T)
+                    new_covs[c, expert_adapted, e] = shrink_cov(new_covs[c, expert_adapted, e], shrink)
+
+        # Average distribution over all experts
+        new_means = new_means.mean(2)
+        new_covs = new_covs.mean(2)
         return new_means, new_covs
 
 
