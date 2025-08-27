@@ -143,7 +143,6 @@ class AveragedAdapter(torch.nn.Module):
                 for e in range(self.num_experts):
                     distribution = MultivariateNormal(means[c, e], covs[c, e])
                     samples = distribution.sample((self.N,))
-                    samples = samples.flatten(1)
                     if torch.isnan(samples).any():
                         raise RuntimeError(f"Nan in features sampled for class {c}")
                     adapted_samples = networks_list[e](samples)
