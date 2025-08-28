@@ -23,7 +23,7 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False,
+                 logger=None, N=10000, shrink_inference=3.0, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False,
                  load_path=None, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0.,
                  adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., multiplier=32, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
@@ -43,6 +43,7 @@ class Appr(Inc_Learning_Appr):
         self.lr_adapter = lr_adapter
         self.multiplier = multiplier
         self.shrink = shrink
+        self.shrink_inference = shrink_inference
         self.smoothing = smoothing
         self.adaptation_strategy = adaptation_strategy
         self.old_models = None
@@ -120,9 +121,13 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=2)
         parser.add_argument('--shrink',
-                            help='shrink for adaptation',
+                            help='shrink added after creating distributions and after adapting them',
                             type=float,
-                            default=0.0)
+                            default=0.01)
+        parser.add_argument('--shrink-inference',
+                            help='shrink for inference',
+                            type=float,
+                            default=3.0)
         parser.add_argument('--adaptation-strategy',
                             help='Activation functions in resnet',
                             type=str,
@@ -209,10 +214,10 @@ class Appr(Inc_Learning_Appr):
         covs = self.covs.clone()
         for expert_num in range(self.K):
 
-            print(f"Cov matrix det: {torch.linalg.det(covs[:, expert_num])}")
+            # print(f"Cov matrix det: {torch.linalg.det(covs[:, expert_num])}")
             for i in range(covs.shape[0]):
                 print(f"Rank for expert: {expert_num}, class {i}: {torch.linalg.matrix_rank(self.covs[i, expert_num], tol=0.01)}")
-                covs[i, expert_num] = shrink_cov(covs[i, expert_num], 3)
+                covs[i, expert_num] = shrink_cov(covs[i, expert_num], self.shrink_inference)
             covs[:, expert_num] = norm_cov(covs[:, expert_num])
 
         self.covs_inverted = torch.linalg.inv(covs)
