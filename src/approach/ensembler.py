@@ -23,7 +23,8 @@ class Appr(Inc_Learning_Appr):
 
     def __init__(self, model, device, nepochs=200, lr=0.05, lr_min=1e-4, lr_factor=3, lr_patience=5, clipgrad=1,
                  momentum=0, wd=0, multi_softmax=False, wu_nepochs=0, wu_lr_factor=1, patience=5, fix_bn=False, eval_on_train=False,
-                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0.,
+                 logger=None, N=10000, K=5, alpha=1., lr_backbone=0.01, lr_adapter=0.01, beta=1., use_224=False, S=64, dump=False,
+                 load_path=None, rotation=False, distiller="linear", adapter="linear", criterion="proxy-nca", lamb=10, tau=2, smoothing=0.,
                  adaptation_strategy="full", pretrained_net=False, normalize=False, shrink=0., multiplier=32, classifier="bayes"):
         super(Appr, self).__init__(model, device, nepochs, lr, lr_min, lr_factor, lr_patience, clipgrad, momentum, wd,
                                    multi_softmax, wu_nepochs, wu_lr_factor, fix_bn, eval_on_train, logger,
@@ -37,6 +38,7 @@ class Appr(Inc_Learning_Appr):
         self.beta = beta
         self.lamb = lamb
         self.tau = tau
+        self.load_path = load_path
         self.lr_backbone = lr_backbone
         self.lr_adapter = lr_adapter
         self.multiplier = multiplier
@@ -118,7 +120,7 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=2)
         parser.add_argument('--shrink',
-                            help='shrink during inference',
+                            help='shrink for adaptation',
                             type=float,
                             default=0.0)
         parser.add_argument('--adaptation-strategy',
@@ -166,6 +168,10 @@ class Appr(Inc_Learning_Appr):
                             help='save checkpoints',
                             action='store_true',
                             default=False)
+        parser.add_argument('--load-path',
+                            help='load checkpoints',
+                            type=str,
+                            default=None)
         parser.add_argument('--rotation',
                             help='Rotate images in the first task to enhance feature extractor',
                             action='store_true',
@@ -182,11 +188,14 @@ class Appr(Inc_Learning_Appr):
         self.old_means = copy.deepcopy(self.means)
         self.old_covs = copy.deepcopy(self.covs)
         self.task_offset.append(num_classes_in_t + self.task_offset[-1])
-        print("### Training backbone ###")
-        # state_dict = torch.load(f"ckpts-5/models_{t}.pth")
-        # self.models.load_state_dict(state_dict, strict=True)
 
-        self.train_experts(t, trn_loader, val_loader, num_classes_in_t)
+        if self.load_path is not None:
+            print(f"### Loading backbone from {self.load_path}  ###")
+            state_dict = torch.load(f"{self.load_path}/models_{t}.pth")
+            self.models.load_state_dict(state_dict, strict=True)
+        else:
+            print("### Training backbone ###")
+            self.train_experts(t, trn_loader, val_loader, num_classes_in_t)
         if t > 0 and self.adaptation_strategy != "none":
             print("### Adapting gausses ###")
             self.adapt_distributions(t, trn_loader, val_loader)
@@ -309,46 +318,48 @@ class Appr(Inc_Learning_Appr):
 
         adapter = self.adapter(self.K, self.S, self.multiplier)
         adapter.to(self.device, non_blocking=True)
-        # state_dict = torch.load(f"ckpts-5/adapter_{t}.pth")
-        # adapter.load_state_dict(state_dict, strict=True)
-        optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
-        for epoch in range(self.nepochs // 2):
-            adapter.train()
-            train_loss, valid_loss = [], []
-            for images, _ in trn_loader:
-                bsz = images.shape[0]
-                images = images.to(self.device, non_blocking=True)
-                optimizer.zero_grad()
-                new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
-                old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
-                with torch.no_grad():
-                    for expert_num in range(self.K):
-                        new_features[:, expert_num] = self.models[expert_num](images)
-                        old_features[:, expert_num] = self.old_models[expert_num](images)
-                loss = adapter(old_features, new_features)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
-                optimizer.step()
-                train_loss.append(float(bsz * loss))
-            lr_scheduler.step()
-
-            if epoch % 10 == 9:
-                adapter.eval()
-                with torch.no_grad():
-                    for images, _ in val_loader:
-                        bsz = images.shape[0]
-                        images = images.to(self.device, non_blocking=True)
-                        new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
-                        old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+        if self.load_path is not None:
+            state_dict = torch.load(f"{self.load_path}/adapter_{t}.pth")
+            adapter.load_state_dict(state_dict, strict=True)
+        else:  # Train adapters
+            optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
+            for epoch in range(self.nepochs // 2):
+                adapter.train()
+                train_loss, valid_loss = [], []
+                for images, _ in trn_loader:
+                    bsz = images.shape[0]
+                    images = images.to(self.device, non_blocking=True)
+                    optimizer.zero_grad()
+                    new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                    old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                    with torch.no_grad():
                         for expert_num in range(self.K):
                             new_features[:, expert_num] = self.models[expert_num](images)
                             old_features[:, expert_num] = self.old_models[expert_num](images)
-                        loss = adapter(old_features, new_features)
-                        valid_loss.append(float(bsz * loss))
+                    loss = adapter(old_features, new_features)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
+                    optimizer.step()
+                    train_loss.append(float(bsz * loss))
+                lr_scheduler.step()
 
-            train_loss = sum(train_loss) / len(trn_loader.dataset)
-            valid_loss = sum(valid_loss) / len(val_loader.dataset)
-            print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f}")
+                if epoch % 10 == 9:
+                    adapter.eval()
+                    with torch.no_grad():
+                        for images, _ in val_loader:
+                            bsz = images.shape[0]
+                            images = images.to(self.device, non_blocking=True)
+                            new_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                            old_features = torch.zeros((bsz, self.K, self.S), device=self.device)
+                            for expert_num in range(self.K):
+                                new_features[:, expert_num] = self.models[expert_num](images)
+                                old_features[:, expert_num] = self.old_models[expert_num](images)
+                            loss = adapter(old_features, new_features)
+                            valid_loss.append(float(bsz * loss))
+
+                train_loss = sum(train_loss) / len(trn_loader.dataset)
+                valid_loss = sum(valid_loss) / len(val_loader.dataset)
+                print(f"Epoch: {epoch} Train loss: {train_loss:.2f} Val loss: {valid_loss:.2f}")
 
         if self.dump:
             torch.save(adapter.state_dict(), f"{self.logger.exp_path}/adapter_{t}.pth")
