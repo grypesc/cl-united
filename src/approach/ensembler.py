@@ -1,4 +1,5 @@
 import copy
+import math
 import random
 import torch
 import torch.nn.functional as F
@@ -127,7 +128,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--shrink-inference',
                             help='shrink for inference',
                             type=float,
-                            default=3.0)
+                            default=10.0)
         parser.add_argument('--adaptation-strategy',
                             help='Activation functions in resnet',
                             type=str,
@@ -236,7 +237,7 @@ class Appr(Inc_Learning_Appr):
             val_loader = torch.utils.data.DataLoader(val_loader.dataset, batch_size=val_loader.batch_size // 4, num_workers=val_loader.num_workers, shuffle=False, drop_last=True)
 
         parameters = list(self.models.parameters()) + list(criterion.parameters()) + list(distiller.parameters())
-        optimizer, lr_scheduler = self.get_optimizer(parameters if self.pretrained else parameters, t, self.wd)
+        optimizer, lr_scheduler = self.get_optimizer(parameters if self.pretrained else parameters, t, self.wd, len(trn_loader))
 
         for epoch in range(self.nepochs):
             train_loss, train_kd_loss, valid_loss, valid_kd_loss = [], [], [], []
@@ -256,8 +257,8 @@ class Appr(Inc_Learning_Appr):
                 features = torch.zeros((bsz, self.K, self.S), device=self.device)
                 for expert_num, model in enumerate(self.models):
                     features[:, expert_num] = model(images)
-                if epoch < int(self.nepochs * 0.01):
-                    features = features.detach()
+                # if epoch < int(self.nepochs * 0.01):
+                #     features = features.detach()
                 discriminative_loss = criterion(features, targets)
 
                 # Perform knowledge distillation
@@ -271,14 +272,14 @@ class Appr(Inc_Learning_Appr):
 
                 total_loss = discriminative_loss + self.lamb * kd_loss
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(parameters, 1)
+                torch.nn.utils.clip_grad_norm_(parameters, self.clipgrad)
                 optimizer.step()
                 train_loss.append(float(bsz * discriminative_loss))
                 train_kd_loss.append(float(bsz * kd_loss))
-            lr_scheduler.step()
+                lr_scheduler.step()
 
             val_total = 1e-8
-            if epoch % 10 == 0:
+            if epoch % 10 == 9:
                 self.models.eval()
                 criterion.eval()
                 distiller.eval()
@@ -327,7 +328,7 @@ class Appr(Inc_Learning_Appr):
             state_dict = torch.load(f"{self.load_path}/adapter_{t}.pth")
             adapter.load_state_dict(state_dict, strict=True)
         else:  # Train adapters
-            optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters())
+            optimizer, lr_scheduler = self.get_adapter_optimizer(adapter.parameters(), len(trn_loader))
             for epoch in range(self.nepochs // 2):
                 adapter.train()
                 train_loss, valid_loss = [], []
@@ -343,10 +344,10 @@ class Appr(Inc_Learning_Appr):
                             old_features[:, expert_num] = self.old_models[expert_num](images)
                     loss = adapter(old_features, new_features)
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1)
+                    torch.nn.utils.clip_grad_norm_(adapter.parameters(), self.clipgrad)
                     optimizer.step()
                     train_loss.append(float(bsz * loss))
-                lr_scheduler.step()
+                    lr_scheduler.step()
 
                 if epoch % 10 == 9:
                     adapter.eval()
@@ -488,20 +489,19 @@ class Appr(Inc_Learning_Appr):
         self.means = torch.cat((self.means, new_means), dim=0)
         self.covs = torch.cat((self.covs, new_covs), dim=0)
 
-    def get_optimizer(self, parameters, t, wd):
+    def get_optimizer(self, parameters, t, wd, iters_per_epoch):
         """Returns the optimizer"""
-        milestones = (int(0.3 * self.nepochs), int(0.6 * self.nepochs), int(0.9 * self.nepochs))
         lr = self.lr
-        if t > 0 and not self.pretrained:
-            lr *= 0.33
+        # if t > 0 and not self.pretrained:
+        #     lr *= 0.33
         optimizer = torch.optim.SGD(parameters, lr=lr, weight_decay=wd, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
+        scheduler = get_lr_scheduler(optimizer, 2, self.nepochs, iters_per_epoch)
         return optimizer, scheduler
 
-    def get_adapter_optimizer(self, parameters, milestones=(30, 60, 90)):
+    def get_adapter_optimizer(self, parameters, iters_per_epoch):
         """Returns the optimizer"""
         optimizer = torch.optim.SGD(parameters, lr=self.lr_adapter, weight_decay=5e-4, momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=0.1)
+        scheduler = get_lr_scheduler(optimizer, 2, self.nepochs // 2, iters_per_epoch)
         return optimizer, scheduler
 
     @torch.no_grad()
@@ -536,6 +536,12 @@ class Appr(Inc_Learning_Appr):
             taw_acc.update(taw_preds.cpu(), target)
 
         return 0, float(taw_acc.compute()), float(tag_acc.compute())
+
+
+def get_lr_scheduler(optimizer, warmup_epochs, epochs, iterations_per_epoch, milestones=(0.25, 0.50, 0.75, 0.90)):
+    warming_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 1e-8, total_iters=warmup_epochs * iterations_per_epoch)
+    decay_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[math.ceil(epochs * iterations_per_epoch * m) for m in milestones], gamma=0.1)
+    return torch.optim.lr_scheduler.SequentialLR(optimizer, [warming_scheduler, decay_scheduler], [warmup_epochs * iterations_per_epoch])
 
 
 def compute_rotations(images, targets, total_classes):
