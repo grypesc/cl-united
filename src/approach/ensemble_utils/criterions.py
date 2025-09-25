@@ -52,10 +52,9 @@ class SCE(torch.nn.Module):
     def forward(self, features, T):
         total_loss = 0
         bsz = features.shape[0]
-
+        T = T.unsqueeze(1).unsqueeze(1).repeat(1, 1, self.nb_classes)
         for e in range(self.num_experts):
             sm = self.smooth_matrices[e].expand(bsz, self.nb_classes, self.nb_classes)
-            T = T.unsqueeze(1).unsqueeze(1).repeat(1, 1, self.nb_classes)
             target = torch.gather(sm, 1, T).squeeze(1)
             logits = self.heads[e](features[:, e])
             total_loss += F.cross_entropy(logits, target)
