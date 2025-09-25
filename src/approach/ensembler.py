@@ -14,7 +14,7 @@ from torchmetrics import Accuracy
 from .mvgb import ClassMemoryDataset, ClassDirectoryDataset
 from .models.resnet18 import resnet18
 from .incremental_learning import Inc_Learning_Appr
-from .ensemble_utils.criterions import EnsembledCE
+from .ensemble_utils.criterions import CE, SCE
 from .ensemble_utils.distillers import BaselineDistiller, ConcatenatedDistiller, AveragedDistiller
 from .ensemble_utils.adapters import BaselineAdapter, ConcatenatedAdapter, AveragedAdapter, shrink_cov, norm_cov
 
@@ -71,7 +71,8 @@ class Appr(Inc_Learning_Appr):
         self.is_rotation = rotation
         self.task_offset = [0]
         self.classes_in_tasks = []
-        self.criterion = {"ce": EnsembledCE}[criterion]
+        self.criterion = {"ce": CE,
+                          "sce": SCE}[criterion]
         self.adapter = {"baseline": BaselineAdapter, "concatenated": ConcatenatedAdapter,
                         "averaged": AveragedAdapter, "none": None}[adapter]
         self.distiller = {"baseline": BaselineDistiller, "concatenated": ConcatenatedDistiller,
@@ -147,7 +148,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--criterion',
                             help='Loss function',
                             type=str,
-                            choices=["ce", "proxy-nca", "proxy-yolo"],
+                            choices=["ce", "sce"],
                             default="ce")
         parser.add_argument('--classifier',
                             help='Classifier type',
