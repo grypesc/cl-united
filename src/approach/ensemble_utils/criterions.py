@@ -1,4 +1,4 @@
-import random
+import numpy
 
 import torch
 import torch.nn.functional as F
@@ -11,7 +11,7 @@ class CE(torch.nn.Module):
                  sz_embedding,
                  device,
                  smoothing=0.0,
-                 ):
+                 **kwargs):
         super().__init__()
         self.num_experts = num_experts
         self.heads = torch.nn.ModuleList([torch.nn.Linear(sz_embedding, nb_classes, device=device) for _ in range(self.num_experts)])
@@ -32,6 +32,7 @@ class SCE(torch.nn.Module):
                  sz_embedding,
                  device,
                  smoothing=0.0,
+                 beta=10
                  ):
         super().__init__()
         self.num_experts = num_experts
@@ -41,11 +42,12 @@ class SCE(torch.nn.Module):
         # smoothing_matrices is a symmetrical matrix of probabilities for each class. Its columns sum to 1
         self.smooth_matrices = torch.zeros((num_experts, nb_classes, nb_classes), device=device)
         for e in range(num_experts):
-            indices_to_smooth = torch.randint(0, nb_classes, (10, 2), device=device)
+            indices_to_smooth = torch.randint(0, nb_classes, (beta, 2), device=device)
             indices_to_smooth = indices_to_smooth[indices_to_smooth[:, 0] != indices_to_smooth[:, 1]]
             symmetrical_indices = indices_to_smooth.flip(1)
             indices_to_smooth = torch.cat((indices_to_smooth, symmetrical_indices), dim=0)
-            self.smooth_matrices[e, indices_to_smooth[:, 0], indices_to_smooth[:, 1]] = smoothing
+            for index in list(indices_to_smooth):
+                self.smooth_matrices[e, index[0], index[1]] += smoothing
             col_sum = self.smooth_matrices[e].sum(1)
             torch.diagonal(self.smooth_matrices[e])[:] = 1 - col_sum
 

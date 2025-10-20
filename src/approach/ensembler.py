@@ -99,9 +99,9 @@ class Appr(Inc_Learning_Appr):
                             type=float,
                             default=1.0)
         parser.add_argument('--beta',
-                            help='Anti-collapse loss clamp',
-                            type=float,
-                            default=1.0)
+                            help='Number of indicies to smooth in SCE',
+                            type=int,
+                            default=10)
         parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
@@ -158,7 +158,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--smoothing',
                             help='label smoothing',
                             type=float,
-                            default=0.0)
+                            default=0.01)
         parser.add_argument('--use-224',
                             help='Additional max pool and different conv1 in Resnet18',
                             action='store_true',
@@ -231,7 +231,7 @@ class Appr(Inc_Learning_Appr):
         print(f'The expert has {sum(p.numel() for p in self.models.parameters() if not p.requires_grad):,} shared parameters\n')
         distiller = self.distiller(self.K, self.S, self.multiplier, "mlp")
         distiller.to(self.device, non_blocking=True)
-        criterion = self.criterion(self.K, num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
+        criterion = self.criterion(self.K, num_classes_in_t, self.S, self.device, smoothing=self.smoothing, beta=self.beta)
         if t == 0 and self.is_rotation:
             criterion = self.criterion(self.K, 4 * num_classes_in_t, self.S, self.device, smoothing=self.smoothing)
             trn_loader = torch.utils.data.DataLoader(trn_loader.dataset, batch_size=trn_loader.batch_size // 4, num_workers=trn_loader.num_workers, shuffle=True, drop_last=True)
