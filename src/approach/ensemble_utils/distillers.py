@@ -63,17 +63,17 @@ class ConcatenatedDistiller(torch.nn.Module):
                  ):
         super().__init__()
         self.num_experts = num_experts
-        network_fun = lambda x, d, k: nn.Linear(k * x, x)
+        network_fun = lambda x, d, k: nn.Linear(x, k * x)
         if network_type == "mlp":
-            network_fun = lambda x, d, k: nn.Sequential(nn.Linear(k * x, d * x),
+            network_fun = lambda x, d, k: nn.Sequential(nn.Linear(x, d * x),
                                                      nn.GELU(),
-                                                     nn.Linear(d * x, x)
+                                                     nn.Linear(d * x, k * x)
                                                      )
         self.distillers = nn.ModuleList([network_fun(sz_embedding, multiplier, num_experts) for _ in range(self.num_experts)])
 
     def forward(self, features, target_features):
         total_loss = 0
-        features = features.flatten(1)
+        target_features = target_features.flatten(1)
         for e, network in enumerate(self.distillers):
-            total_loss += F.mse_loss(network(features), target_features[:, e])
+            total_loss += F.mse_loss(network(features[:, e]), target_features)
         return total_loss / self.num_experts
