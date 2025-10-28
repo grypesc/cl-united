@@ -101,7 +101,7 @@ class Appr(Inc_Learning_Appr):
         parser.add_argument('--beta',
                             help='Number of indicies to smooth in SCE',
                             type=int,
-                            default=10)
+                            default=20)
         parser.add_argument('--lamb',
                             help='Weight of kd loss',
                             type=float,
@@ -149,7 +149,7 @@ class Appr(Inc_Learning_Appr):
                             help='Loss function',
                             type=str,
                             choices=["ce", "sce"],
-                            default="ce")
+                            default="sce")
         parser.add_argument('--classifier',
                             help='Classifier type',
                             type=str,
