@@ -91,6 +91,7 @@ class ConcatenatedAdapter(torch.nn.Module):
             for c in range(means.shape[0]):
                 samples = torch.zeros((10000, self.num_experts,  means.shape[2]), device=means.device)
                 for e in range(self.num_experts):
+                    torch.manual_seed(0)  # Make sure that sampled points are polarized
                     distribution = MultivariateNormal(means[c, e], covs[c, e])
                     samples[:, e, :] = distribution.sample((self.N,))
                 samples = samples.flatten(1)
