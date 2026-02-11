@@ -1,4 +1,10 @@
-# AdaGauss repository
+# Ensemble of experts repository (aka united we stand)
+
+This work is based on work https://arxiv.org/html/2401.10191  
+
+Here we train a single expert but utilize knowledge distillation from all the experts into the trained one.  
+
+# Setup  
 
 Create virtual environment and install dependencies
 ```bash
