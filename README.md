@@ -17,3 +17,6 @@ Reproduce experiments using scripts in ```scripts``` directory:
 ```bash
 bash scripts/cifar-10x10.sh
 ```
+
+# Acknowledgments  
+This work was supported by the National Science Centre (Poland), PRELUDIUM 23 grant no. 2024/53/N/ST6/03018.
